@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: file: https:" />
+    <title>Caisse - Association - Buvette</title>
+    <!-- Thème : même clé que themeStorage.ts (UI_THEME_STORAGE_KEY) — évite le flash avant le bundle -->
+    <script>
+      (function () {
+        try {
+          var k = 'caisse-ui-theme'
+          var v = localStorage.getItem(k)
+          if (v === 'light' || v === 'dark') document.documentElement.setAttribute('data-theme', v)
+          else document.documentElement.setAttribute('data-theme', 'dark')
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark')
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
