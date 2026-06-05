@@ -4,6 +4,7 @@ import { useAppState } from '@renderer/state/AppStateContext'
 export default function SumUpView(): JSX.Element {
   const { data, setData } = useAppState()
   const s = data.integrations.sumup
+  const cashPaymentUi = data.cashPaymentUi === 'express' ? 'express' : 'detail'
   const [readersMsg, setReadersMsg] = useState<string | null>(null)
   const [readersBusy, setReadersBusy] = useState(false)
 
@@ -56,9 +57,9 @@ export default function SumUpView(): JSX.Element {
       <div className="page-inner">
         <div className="page-head">
           <div>
-            <h2 className="page-title">SumUp</h2>
+            <h2 className="page-title">Encaissement / SumUp</h2>
             <p className="page-desc">
-              Trois informations suffisent : <strong>code marchand</strong>,{' '}
+              <strong>SumUp</strong> pour la carte : trois informations suffisent — <strong>code marchand</strong>,{' '}
               <strong>clé API</strong> (Bearer), <strong>identifiant terminal</strong> (<span className="mono">reader_id</span>{' '}
               type <span className="mono">rdr_…</span>). Laissez le terminal vide pour la carte en ligne uniquement.
               Détail terminal :{' '}
@@ -67,6 +68,41 @@ export default function SumUpView(): JSX.Element {
               </a>
               .
             </p>
+          </div>
+        </div>
+
+        <div className="card form-card sumup-payment-ui-card">
+          <h3 className="sumup-fieldmap-title">Espèces à la caisse</h3>
+          <p className="page-desc sumup-payment-ui-lead">
+            Quand vous choisissez <strong>Espèces</strong> au paiement : afficher tout de suite les boutons 1&nbsp;€, 2&nbsp;€,
+            10&nbsp;€… ou privilégier l’encaisse <strong>montant exact en un clic</strong> (la grille reste accessible pour
+            un client qui donne un montant partiel — le <strong>reste par carte</strong> / SumUp est toujours proposé).
+          </p>
+          <div className="settings-theme-toggle" role="group" aria-label="Interface espèces">
+            <button
+              type="button"
+              className={`settings-theme-btn${cashPaymentUi === 'detail' ? ' active' : ''}`}
+              onClick={() =>
+                setData((prev) => ({
+                  ...prev,
+                  cashPaymentUi: 'detail'
+                }))
+              }
+            >
+              Pièces / billets
+            </button>
+            <button
+              type="button"
+              className={`settings-theme-btn${cashPaymentUi === 'express' ? ' active' : ''}`}
+              onClick={() =>
+                setData((prev) => ({
+                  ...prev,
+                  cashPaymentUi: 'express'
+                }))
+              }
+            >
+              Encais rapide
+            </button>
           </div>
         </div>
 
@@ -90,8 +126,8 @@ export default function SumUpView(): JSX.Element {
           </ul>
         </div>
 
-        <div className="card form-card">
-          <label className="check-label sumup-enable-row">
+        <div className="card form-card sumup-config-card">
+          <label className="check-label block-check sumup-enable-row">
             <input
               type="checkbox"
               checked={s.enabled}
@@ -139,7 +175,7 @@ export default function SumUpView(): JSX.Element {
           <div className="sumup-readers-row">
             <button
               type="button"
-              className="btn btn-secondary"
+              className="btn btn-secondary sumup-action-btn"
               disabled={readersBusy || !s.merchantCode.trim() || !s.apiKey.trim()}
               onClick={() => void loadReaders()}
             >

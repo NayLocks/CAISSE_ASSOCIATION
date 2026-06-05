@@ -3,9 +3,9 @@ import { extname } from 'path'
 import { existsSync, readFileSync } from 'fs'
 import type { SaleRecord } from '../shared/sales.js'
 import type { AppPersistedData } from '../shared/catalog.js'
-import { receiptLegalInfoFromAssociation } from '../shared/catalog.js'
-import { buildSummaryReceiptDocument } from './ticketHtml.js'
-import { htmlDocumentToPdf } from './printWindow.js'
+import { receiptLegalInfoFromAssociation, clampReceiptLogoWidthPercent } from '../shared/catalog.js'
+import { formatOrderDigits, formatOrderLabel } from '../shared/orderDigits.js'
+import { buildSummaryReceiptDocument, htmlDocumentToPdf } from './printWindow.js'
 import { logoFullPath } from './stateStore.js'
 
 function escHtml(s: string): string {
@@ -16,7 +16,7 @@ function escHtml(s: string): string {
     .replace(/"/g, '&quot;')
 }
 
-/** Pour attribut <code>src</code> (data URL) : &amp; et &quot; uniquement, sans altérer le reste. */
+/** Pour attribut <code>src</code> (data URL) */
 function escAttrUrl(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
 }
@@ -26,16 +26,17 @@ function formatMoney(cents: number): string {
 }
 
 function formatOrderNo(n: number): string {
-  return `N° ${String(n).padStart(6, '0')}`
+  return formatOrderLabel(n)
 }
 
 function safeAttachmentBaseName(sale: SaleRecord): string {
-  const n = sale.orderNumber != null && sale.orderNumber > 0 ? String(sale.orderNumber).padStart(6, '0') : 'archive'
+  const n =
+    sale.orderNumber != null && sale.orderNumber > 0 ? formatOrderDigits(sale.orderNumber) : 'archive'
   const raw = `ticket-caisse-${n}`
   return raw.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'ticket-caisse'
 }
 
-/** Corps HTML court : logo réduit, événement, récap ; le ticket détaillé est en pièce jointe PDF. */
+/** Corps HTML court : logo réduit ; le ticket détaillé est en pièce jointe PDF. */
 function buildReceiptEmailBodyHtml(sale: SaleRecord, logoDataUrl: string | null): string {
   const ev = sale.eventName.trim() || 'Événement'
   const asso = sale.associationName.trim() || 'Association'
@@ -75,7 +76,7 @@ function buildReceiptEmailBodyHtml(sale: SaleRecord, logoDataUrl: string | null)
     <p style="margin:0 0 14px;">Veuillez trouver en pièce jointe le ticket de caisse au format PDF.</p>
     <table role="presentation" cellpadding="0" cellspacing="0" style="font-size:14px;color:#333;margin:0;">
       <tr><td style="padding:3px 0;color:#666;">Événement</td><td style="padding:3px 0 3px 10px;"><strong>${escHtml(ev)}</strong></td></tr>
-      <tr><td style="padding:3px 0;color:#666;">Commande</td><td style="padding:3px 0 3px 10px;"><strong>${escHtml(ord)}</strong></td></tr>
+      <tr><td style="padding:3px 0;color:#666;">Référence</td><td style="padding:3px 0 3px 10px;"><strong>${escHtml(ord)}</strong></td></tr>
       <tr><td style="padding:3px 0;color:#666;">${escHtml(totalLabel)}</td><td style="padding:3px 0 3px 10px;"><strong>${escHtml(formatMoney(sale.totalCents))}</strong></td></tr>
       <tr><td style="padding:3px 0;color:#666;">Date</td><td style="padding:3px 0 3px 10px;">${escHtml(dateStr)}</td></tr>
     </table>
@@ -110,7 +111,7 @@ function buildReceiptEmailBodyText(sale: SaleRecord): string {
     `Veuillez trouver en pièce jointe le ticket de caisse au format PDF.`,
     ``,
     `Récapitulatif :`,
-    `- Commande : ${ord}`,
+    `- Référence : ${ord}`,
     `- ${totalLabel} : ${formatMoney(sale.totalCents)}`,
     `- Date : ${dateStr}`
   ].join('\n')
@@ -240,7 +241,9 @@ export async function sendSummaryReceiptEmail(
   const c = data.emailReceipt
   const legal = receiptLegalInfoFromAssociation(data.association)
   const logoDataUrl = readLogoDataUrl(data.association.logoFile)
-  const ticketHtml = buildSummaryReceiptDocument(sale, logoDataUrl, legal)
+  const ticketHtml = buildSummaryReceiptDocument(sale, logoDataUrl, legal, {
+    logoWidthPercent: clampReceiptLogoWidthPercent(data.association.receiptLogoWidthPercent)
+  })
   const pdfResult = await htmlDocumentToPdf(ticketHtml)
   if (!pdfResult.ok) {
     return { ok: false, error: pdfResult.error || 'Génération du PDF impossible.' }
@@ -251,7 +254,7 @@ export async function sendSummaryReceiptEmail(
 
   const ordSubject =
     sale.orderNumber != null && sale.orderNumber > 0
-      ? `Cde N°${String(sale.orderNumber).padStart(6, '0')}`
+      ? formatOrderLabel(sale.orderNumber)
       : 'Ticket caisse'
   const evShort = sale.eventName.trim() || 'Événement'
   const assoShort = sale.associationName.trim() || 'Caisse'

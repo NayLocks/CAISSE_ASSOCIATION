@@ -44,6 +44,14 @@ export default function HeaderCashMenu({
   }, [reload, orderCounter])
 
   useEffect(() => {
+    const onRefresh = (): void => {
+      reload()
+    }
+    window.addEventListener('caisse-sales-refresh', onRefresh)
+    return () => window.removeEventListener('caisse-sales-refresh', onRefresh)
+  }, [reload])
+
+  useEffect(() => {
     const t = setInterval(reload, 15000)
     return () => clearInterval(t)
   }, [reload])

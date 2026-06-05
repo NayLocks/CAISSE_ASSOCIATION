@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AppStateProvider, useAppState } from '@renderer/state/AppStateContext'
 import { useAuthUi } from '@renderer/state/AuthUiContext'
-import { AssociationSessionContext } from '@renderer/state/AssociationSessionContext'
+import { AssociationSessionContext, useAssociationSession } from '@renderer/state/AssociationSessionContext'
 import AuthGate from '@renderer/components/AuthGate'
 import AssociationPicker from '@renderer/components/AssociationPicker'
+import EventPicker from '@renderer/components/EventPicker'
 import LicenseView from '@renderer/views/LicenseView'
 import CaisseView from '@renderer/views/CaisseView'
 import AssociationView from '@renderer/views/AssociationView'
@@ -18,7 +19,9 @@ import RemoteCaisseView from '@renderer/views/RemoteCaisseView'
 import StockView from '@renderer/views/StockView'
 import SumUpView from '@renderer/views/SumUpView'
 import SettingsView from '@renderer/views/SettingsView'
+import DataBackupView from '@renderer/views/DataBackupView'
 import AppearanceView from '@renderer/views/AppearanceView'
+import DiscountMotifsView from '@renderer/views/DiscountMotifsView'
 import { ShellNavProvider } from '@renderer/state/ShellNavContext'
 import HeaderCashMenu from '@renderer/components/HeaderCashMenu'
 import {
@@ -27,17 +30,72 @@ import {
   writeStoredUiTheme,
   type UiTheme
 } from '@renderer/themeStorage'
-import { SHELL_NAV_GROUPS, type ShellViewId } from '@renderer/config/shellNav'
+import {
+  applyUiDesignToDocument,
+  readStoredUiDesign,
+  writeStoredUiDesign,
+  type UiDesign
+} from '@renderer/designSystemStorage'
+import { isShellViewId, SHELL_NAV_GROUPS, type ShellViewId } from '@renderer/config/shellNav'
+import { ToastProvider, useToast } from '@renderer/state/ToastContext'
+import { eventMatchesShortcut, readKeyboardShortcuts } from '@renderer/utils/keyboardShortcutsStorage'
 
 export type AppView = ShellViewId
 
+function readInitialShellView(): AppView {
+  try {
+    const h = window.location.hash.replace(/^#/, '')
+    if (isShellViewId(h)) return h
+  } catch {
+    /* ignore */
+  }
+  return 'caisse'
+}
+
 function Shell(): JSX.Element {
-  const { data, setData, logoHref } = useAppState()
+  const { data, setData, logoHref, refreshData } = useAppState()
   const { requestLock } = useAuthUi()
-  const [view, setView] = useState<AppView>('caisse')
+  const { switchAssociation } = useAssociationSession()
+  const [view, setView] = useState<AppView>(readInitialShellView)
+
+  const setViewAndHash = useCallback((v: AppView) => {
+    setView(v)
+    const next = `#${v}`
+    if (window.location.hash !== next) {
+      window.history.replaceState(null, '', next)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onHash = (): void => {
+      const h = window.location.hash.replace(/^#/, '')
+      if (isShellViewId(h)) setView(h)
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (eventMatchesShortcut(e, readKeyboardShortcuts().gotoCaisse)) {
+        e.preventDefault()
+        setViewAndHash('caisse')
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [setViewAndHash])
+
+  useEffect(() => {
+    if (!window.location.hash) window.history.replaceState(null, '', '#caisse')
+  }, [])
+
   const [licenseAssocWarn, setLicenseAssocWarn] = useState<string | null>(null)
+  const [syncServerWarn, setSyncServerWarn] = useState<string | null>(null)
+  const [updateAvailMsg, setUpdateAvailMsg] = useState<string | null>(null)
   const [now, setNow] = useState(() => new Date())
   const [uiTheme, setUiTheme] = useState<UiTheme>(() => readStoredUiTheme())
+  const [uiDesign, setUiDesign] = useState<UiDesign>(() => readStoredUiDesign())
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return localStorage.getItem('caisse-sidebar-collapsed') === '1'
@@ -50,6 +108,11 @@ function Shell(): JSX.Element {
     applyUiThemeToDocument(uiTheme)
     writeStoredUiTheme(uiTheme)
   }, [uiTheme])
+
+  useEffect(() => {
+    applyUiDesignToDocument(uiDesign)
+    writeStoredUiDesign(uiDesign)
+  }, [uiDesign])
 
   useEffect(() => {
     const t = data.clientDisplayTheme ?? 'light'
@@ -79,6 +142,33 @@ function Shell(): JSX.Element {
       cancelled = true
     }
   }, [data.association.licenseAssociationCode])
+
+  useEffect(() => {
+    const offStatus = window.caisse.onAssociationAutoSyncStatus((p) => {
+      setSyncServerWarn(p.banner)
+    })
+    const offApplied = window.caisse.onAssociationSyncDataApplied(() => {
+      void refreshData()
+    })
+    return () => {
+      offStatus()
+      offApplied()
+    }
+  }, [refreshData])
+
+  useEffect(() => {
+    void window.caisse.getAppPaths().then((paths) => {
+      void window.caisse.updateCheck({ currentVersion: paths.appVersion }).then((r) => {
+        if (!r.ok || !r.update_available || !r.latest) {
+          setUpdateAvailMsg(null)
+          return
+        }
+        setUpdateAvailMsg(
+          `Mise à jour ${r.latest.version} disponible (installée : ${paths.appVersion}). Redémarrez l’application pour l’installer au lancement.`
+        )
+      })
+    })
+  }, [])
 
   const timeStr = useMemo(
     () =>
@@ -110,12 +200,15 @@ function Shell(): JSX.Element {
       ? data.eventSessions[data.selectedEventId]
       : null
 
-  const onEventChange = useCallback(
-    (e: ChangeEvent<HTMLSelectElement>) => {
-      const id = e.target.value || null
-      setData((prev) => ({ ...prev, selectedEventId: id }))
-    },
-    [setData]
+  const eventPickerRows = useMemo(
+    () =>
+      data.events.map((ev) => ({
+        id: ev.id,
+        name: ev.name,
+        date: ev.date ?? null,
+        closed: ev.closed === true
+      })),
+    [data.events]
   )
 
   const sidebarNav = (
@@ -129,7 +222,7 @@ function Shell(): JSX.Element {
               type="button"
               className={`sidebar-nav-btn${view === id ? ' active' : ''}`}
               title={label}
-              onClick={() => setView(id)}
+              onClick={() => setViewAndHash(id)}
             >
               <span className="sidebar-nav-ico" aria-hidden>
                 {icon}
@@ -143,7 +236,7 @@ function Shell(): JSX.Element {
   )
 
   return (
-    <ShellNavProvider goToCaisse={() => setView('caisse')}>
+    <ShellNavProvider goToCaisse={() => setViewAndHash('caisse')}>
       <div className="app">
         <aside className={`app-sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
           <div className="sidebar-brand">
@@ -160,6 +253,42 @@ function Shell(): JSX.Element {
             </div>
           </div>
           {sidebarNav}
+          <div className="sidebar-nav-section sidebar-nav-logout">
+            <div className="sidebar-nav-heading">Session</div>
+            <button
+              type="button"
+              className="sidebar-nav-btn sidebar-logout-btn"
+              title="Fermer la session de cette association et revenir à l’accueil (choix d’association)"
+              onClick={() => {
+                void window.caisse.setClientDisplaySessionOpen(false)
+                switchAssociation()
+              }}
+            >
+              <span className="sidebar-nav-ico" aria-hidden>
+                🚪
+              </span>
+              <span className="sidebar-nav-label">Déconnexion</span>
+            </button>
+          </div>
+          <div className="sidebar-design-block">
+            <button
+              type="button"
+              className="sidebar-design-toggle"
+              title={
+                uiDesign === 'classic'
+                  ? 'Activer le design Atelier (refonte visuelle)'
+                  : 'Revenir au design classique'
+              }
+              onClick={() => setUiDesign((d) => (d === 'classic' ? 'next' : 'classic'))}
+            >
+              <span className="sidebar-design-ico" aria-hidden>
+                {uiDesign === 'classic' ? '✦' : '◆'}
+              </span>
+              <span className="sidebar-design-label">
+                {uiDesign === 'classic' ? 'Nouveau design' : 'Design classique'}
+              </span>
+            </button>
+          </div>
           <button
             type="button"
             className="sidebar-collapse-btn"
@@ -201,20 +330,11 @@ function Shell(): JSX.Element {
               />
               <label className="event-select-wrap">
                 <span className="sr-only">Événement actif</span>
-                <select
-                  className="event-select"
-                  value={data.selectedEventId ?? ''}
-                  onChange={onEventChange}
-                >
-                  <option value="">— Événement —</option>
-                  {data.events.map((ev) => (
-                    <option key={ev.id} value={ev.id}>
-                      {ev.name}
-                      {ev.date ? ` (${ev.date})` : ''}
-                      {ev.closed ? ' — clôturé' : ''}
-                    </option>
-                  ))}
-                </select>
+                <EventPicker
+                  value={data.selectedEventId}
+                  events={eventPickerRows}
+                  onChange={(id) => setData((prev) => ({ ...prev, selectedEventId: id }))}
+                />
               </label>
               <button
                 type="button"
@@ -238,6 +358,16 @@ function Shell(): JSX.Element {
               <strong>Licence :</strong> {licenseAssocWarn}
             </div>
           )}
+          {syncServerWarn && (
+            <div className="license-app-banner license-app-banner--sync" role="status">
+              <strong>Synchro serveur :</strong> {syncServerWarn}
+            </div>
+          )}
+          {updateAvailMsg && (
+            <div className="license-app-banner license-app-banner--update" role="status">
+              <strong>Mise à jour :</strong> {updateAvailMsg}
+            </div>
+          )}
 
           <div className={`view-root${view === 'caisse' ? '' : ' view-pad'}`}>
             {view === 'caisse' && <CaisseView />}
@@ -253,8 +383,15 @@ function Shell(): JSX.Element {
             {view === 'remoteCaisse' && <RemoteCaisseView />}
             {view === 'history' && <HistoryView />}
             {view === 'appearance' && (
-              <AppearanceView uiTheme={uiTheme} onUiThemeChange={setUiTheme} />
+              <AppearanceView
+                uiTheme={uiTheme}
+                onUiThemeChange={setUiTheme}
+                uiDesign={uiDesign}
+                onUiDesignChange={setUiDesign}
+              />
             )}
+            {view === 'discountMotifs' && <DiscountMotifsView />}
+            {view === 'dataBackup' && <DataBackupView />}
             {view === 'settings' && <SettingsView />}
           </div>
         </div>
@@ -263,20 +400,29 @@ function Shell(): JSX.Element {
   )
 }
 
-export default function App(): JSX.Element {
+function AppInner(): JSX.Element {
+  const { showToast } = useToast()
   const [assocKey, setAssocKey] = useState<string | null>(null)
   const [licenseScreen, setLicenseScreen] = useState(false)
+  const [assocRequestModal, setAssocRequestModal] = useState<{
+    requestId: number
+    title: string
+    message: string
+    status: 'approved' | 'rejected'
+  } | null>(null)
 
   const handleSelectAssociation = useCallback(async (id: string) => {
     const r = await window.caisse.setActiveAssociation(id)
     if (r.ok) setAssocKey(id)
     else if (r.error === 'license') {
-      window.alert(
-        r.message ??
+      showToast({
+        variant: 'error',
+        message:
+          r.message ??
           'Cette association n’est pas autorisée par la licence enregistrée sur cet ordinateur.'
-      )
+      })
     }
-  }, [])
+  }, [showToast])
 
   const switchAssociation = useCallback(() => {
     setAssocKey(null)
@@ -284,25 +430,108 @@ export default function App(): JSX.Element {
     void window.caisse.clearActiveAssociation()
   }, [])
 
+  const runAssociationRequestResponseCheck = useCallback(async () => {
+    const r = await window.caisse.associationRequestCheck()
+    if (r.show) {
+      setAssocRequestModal({
+        requestId: r.requestId,
+        title: r.title,
+        message: r.message,
+        status: r.status
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    void runAssociationRequestResponseCheck()
+  }, [runAssociationRequestResponseCheck])
+
+  const closeAssociationRequestModal = useCallback(async () => {
+    if (!assocRequestModal) return
+    const id = assocRequestModal.requestId
+    setAssocRequestModal(null)
+    await window.caisse.associationRequestDismiss(id)
+    const r = await window.caisse.associationRequestCheck()
+    if (r.show) {
+      setAssocRequestModal({
+        requestId: r.requestId,
+        title: r.title,
+        message: r.message,
+        status: r.status
+      })
+    }
+  }, [assocRequestModal])
+
+  const requestResponseOverlay =
+    assocRequestModal != null ? (
+      <div
+        className="assoc-picker-modal-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="assoc-req-resp-title"
+      >
+        <div
+          className={
+            'assoc-picker-modal card form-card pro-card-elevated' +
+            (assocRequestModal.status === 'rejected' ? ' assoc-req-resp--reject' : '')
+          }
+        >
+          <h3 id="assoc-req-resp-title" className="card-title">
+            {assocRequestModal.title}
+          </h3>
+          <p
+            className="page-desc assoc-req-resp-body"
+            style={{ whiteSpace: 'pre-wrap' }}
+          >
+            {assocRequestModal.message}
+          </p>
+          <div className="assoc-picker-modal-actions">
+            <button type="button" className="btn btn-primary" onClick={() => void closeAssociationRequestModal()}>
+              Fermer
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null
+
   if (!assocKey) {
     if (licenseScreen) {
-      return <LicenseView onBack={() => setLicenseScreen(false)} />
+      return (
+        <>
+          {requestResponseOverlay}
+          <LicenseView onBack={() => setLicenseScreen(false)} />
+        </>
+      )
     }
     return (
-      <AssociationPicker
-        onOpen={handleSelectAssociation}
-        onOpenLicense={() => setLicenseScreen(true)}
-      />
+      <>
+        {requestResponseOverlay}
+        <AssociationPicker
+          onOpen={handleSelectAssociation}
+          onOpenLicense={() => setLicenseScreen(true)}
+        />
+      </>
     )
   }
 
   return (
-    <AssociationSessionContext.Provider value={{ switchAssociation }}>
-      <AppStateProvider key={assocKey}>
-        <AuthGate>
-          <Shell />
-        </AuthGate>
-      </AppStateProvider>
-    </AssociationSessionContext.Provider>
+    <>
+      {requestResponseOverlay}
+      <AssociationSessionContext.Provider value={{ switchAssociation }}>
+        <AppStateProvider key={assocKey}>
+          <AuthGate>
+            <Shell />
+          </AuthGate>
+        </AppStateProvider>
+      </AssociationSessionContext.Provider>
+    </>
+  )
+}
+
+export default function App(): JSX.Element {
+  return (
+    <ToastProvider>
+      <AppInner />
+    </ToastProvider>
   )
 }

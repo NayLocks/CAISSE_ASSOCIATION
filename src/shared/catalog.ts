@@ -15,6 +15,8 @@ export interface ProductConfig {
   /** Fichier image dans userData (comme le logo), sinon null */
   imageFile: string | null
   trackStock: boolean
+  /** Alerte à la caisse si stock ≤ seuil ; null = pas d’alerte. */
+  lowStockThreshold: number | null
 }
 
 export interface AssociationConfig {
@@ -35,10 +37,35 @@ export interface AssociationConfig {
    * Vide sur le ticket = libellé « TVA non applicable — article 293 B du CGI. »
    */
   receiptLegalNote: string
+  /**
+   * Largeur du logo sur les tickets (% de la largeur utile du papier), 5–100.
+   * S’applique au ticket unitaire et au ticket de caisse récapitulatif.
+   */
+  receiptLogoWidthPercent: number
+  /**
+   * Texte affiché dans le cadre gras (validité) sur chaque ticket unitaire.
+   * Chaîne vide = aucun cadre imprimé.
+   */
+  unitTicketValidityNotice: string
+  /** Logo en tête du ticket unitaire (HTML et ESC/POS). Défaut : afficher si un fichier logo est défini. */
+  unitTicketShowLogo: boolean
+  /** Date et heure en pied du ticket unitaire. Défaut : afficher. */
+  unitTicketShowDateTime: boolean
+  /** Nom de l’association en pied du ticket unitaire. Défaut : afficher. */
+  unitTicketShowAssociationName: boolean
 }
 
 /** Affiché sur le ticket (et e-mails texte) si le champ « Mentions TVA » est vide. */
 export const DEFAULT_TVA_MENTION_FR = 'TVA non applicable — article 293 B du CGI.'
+
+/** Exemple de texte (placeholder UI) pour le cadre de validité sur les tickets unitaires. */
+export const DEFAULT_UNIT_TICKET_VALIDITY_FR =
+  "Ce ticket n'est valable que le jour où il a été acheté."
+
+export function clampReceiptLogoWidthPercent(raw: unknown): number {
+  const n = typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw) : 100
+  return Math.max(5, Math.min(100, n))
+}
 
 export interface ReceiptLegalInfo {
   legalAddress: string
@@ -90,6 +117,28 @@ export interface EventItem {
   closed?: boolean
 }
 
+/**
+ * Tickets unitaires : rendu HTML (Chromium, logo, mise en page actuelle) ou ESC/POS brut
+ * (Windows RAW — plus rapide ; logo en bitmap raster si fourni).
+ */
+export type ThermalUnitTicketEngine = 'html_chromium' | 'escpos_raw'
+
+/** Coupe en fin de ticket unitaire (commande ESC/POS `GS V`, mode ESC/POS brut uniquement). */
+export type EscposPaperCutMode = 'partial' | 'full'
+
+/** Largeur de papier pour le mode tickets ESC/POS brut (texte + logo raster). */
+export type EscposPaperWidth = '58mm' | '80mm'
+
+/** Largeur raster (points à ~203 dpi) pour une ligne complète. */
+export function escposDotsPerLine(paper: EscposPaperWidth): number {
+  return paper === '58mm' ? 384 : 576
+}
+
+/** Nombre de caractères « classiques » par ligne (retours à la ligne texte). */
+export function escposCharsPerLine(paper: EscposPaperWidth): number {
+  return paper === '58mm' ? 32 : 48
+}
+
 export interface PrintingConfig {
   /** Nom exact retourné par l’API imprimantes Windows */
   deviceName: string | null
@@ -100,6 +149,28 @@ export interface PrintingConfig {
    * comme « SERVICE INFO » ne gèrent pas l’impression silencieuse).
    */
   silentPrint: boolean
+  /**
+   * Moteur pour les tickets **unitaires** uniquement (récap caisse / e-mail restent en HTML).
+   * `escpos_raw` : Windows uniquement, job RAW ; commandes ESC/POS (texte + logo raster) calquées sur
+   * le ticket HTML (ordre des blocs, polices A/B, encadré validité, `×`).
+   */
+  unitTicketEngine: ThermalUnitTicketEngine
+  /**
+   * Coupe papier après chaque ticket unitaire en mode **ESC/POS brut** (`GS V`).
+   * `partial` = coupe partielle (souvent une languette) ; `full` = coupe totale (ticket détaché).
+   */
+  escposCutMode: EscposPaperCutMode
+  /**
+   * Largeur du rouleau pour l’alignement texte + logo raster en **ESC/POS brut**.
+   * Choisir **58 mm** si les lignes débordent ou semblent trop petites sur un ticket étroit.
+   */
+  escposPaperWidth: EscposPaperWidth
+  /**
+   * Certains modèles (souvent clones ESC/POS) utilisent l’inverse d’Epson : `GS V 0` = partielle,
+   * `GS V 1` = totale. Cocher si la coupe **totale** laisse encore une languette.
+   * @see `escposPaperCut` (mode ESC/POS brut uniquement).
+   */
+  escposCutInverted: boolean
 }
 
 /** Code PIN (hash côté disque, jamais en clair). */
@@ -141,6 +212,70 @@ export interface IntegrationsConfig {
   sumup: SumUpIntegrationConfig
 }
 
+/** Motif prédéfini pour les remises (ligne ou total), configurable dans Apparence. */
+export interface DiscountMotifPreset {
+  id: string
+  /** Texte du motif (bouton et début du libellé enregistré). */
+  label: string
+  /**
+   * Si true, une modale demande le commentaire avant application ; le motif enregistré est
+   * « label — commentaire » (comme l’ancien motif bénévole + prénom).
+   */
+  commentRequired: boolean
+  /** Libellé du champ commentaire dans la modale (ex. prénom, référence). */
+  commentLabel: string
+}
+
+export const DISCOUNT_MOTIF_REASON_MAX = 200
+
+export function formatDiscountMotifReason(label: string, comment: string): string {
+  const l = typeof label === 'string' ? label.trim() : ''
+  const c = typeof comment === 'string' ? comment.trim() : ''
+  if (!l && !c) return ''
+  if (!c) return l.length > DISCOUNT_MOTIF_REASON_MAX ? l.slice(0, DISCOUNT_MOTIF_REASON_MAX) : l
+  const sep = ' — '
+  const full = `${l}${sep}${c}`
+  return full.length > DISCOUNT_MOTIF_REASON_MAX ? full.slice(0, DISCOUNT_MOTIF_REASON_MAX) : full
+}
+
+export const DEFAULT_DISCOUNT_MOTIFS: DiscountMotifPreset[] = [
+  {
+    id: 'preset-benevole',
+    label: 'Bénévole',
+    commentRequired: true,
+    commentLabel: 'Prénom du bénévole'
+  }
+]
+
+export function sanitizeDiscountMotifs(raw: unknown): DiscountMotifPreset[] {
+  const fallback = (): DiscountMotifPreset[] => DEFAULT_DISCOUNT_MOTIFS.map((x) => ({ ...x }))
+  if (!Array.isArray(raw)) return fallback()
+  const out: DiscountMotifPreset[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (out.length >= 25) break
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const id = typeof o.id === 'string' && o.id.trim() ? o.id.trim().slice(0, 64) : ''
+    const label = typeof o.label === 'string' ? o.label.trim() : ''
+    if (!id || !label) continue
+    if (seen.has(id)) continue
+    seen.add(id)
+    const commentRequired = o.commentRequired === true
+    const commentLabel =
+      typeof o.commentLabel === 'string' && o.commentLabel.trim()
+        ? o.commentLabel.trim().slice(0, 80)
+        : 'Commentaire'
+    out.push({
+      id,
+      label: label.slice(0, 120),
+      commentRequired,
+      commentLabel
+    })
+  }
+  return out.length > 0 ? out : fallback()
+}
+
 export interface AppPersistedData {
   association: AssociationConfig
   events: EventItem[]
@@ -164,14 +299,57 @@ export interface AppPersistedData {
   /** Thème de l’écran affichage client (navigateur), poussé avec le panier */
   clientDisplayTheme: 'dark' | 'light'
   /**
+   * Espèces dans la fenêtre de paiement : vignettes pièces/billets tout de suite, ou mise en avant de
+   * l’encaisse « montant exact » avec détail désignatif sur demande (reste toujours possible en carte).
+   */
+  cashPaymentUi: 'detail' | 'express'
+  /**
    * Pilotage caisse depuis une tablette (navigateur sur le même réseau).
    * Le jeton secret est transmis en en-tête Authorization ou dans l’URL de la page tablette.
    */
   remoteCaisseEnabled: boolean
+  /**
+   * Si true (défaut), chaque requête API exige le jeton. Si false, accès ouvert sur le réseau local
+   * (déconseillé sauf réseau fermé / test).
+   */
+  remoteCaisseTokenRequired: boolean
   /** Jeton aléatoire (hex) ; null tant que non généré */
   remoteCaisseToken: string | null
   /** SMTP optionnel pour envoyer le ticket de caisse récapitulatif par e-mail */
   emailReceipt: EmailReceiptConfig
+  /**
+   * Révision locale alignée avec la dernière copie d’association sur le serveur (API association-sync-*).
+   * Null si aucune synchro encore enregistrée sur ce fichier de données.
+   */
+  associationServerSnapshotRevision: number | null
+  /** Motifs de remise proposés dans la fenêtre Remise (caisse et tablette). */
+  discountMotifs: DiscountMotifPreset[]
+  /** Sauvegarde automatique quotidienne vers `associationBackupPath`. */
+  autoBackupEnabled: boolean
+  /** Dernière exécution réussie (YYYY-MM-DD, heure locale). */
+  autoBackupLastRunDate: string | null
+  /** Vérification périodique `association-sync-check` (bandeau + alertes). */
+  associationSyncAutoCheckEnabled: boolean
+  /** Intervalle entre deux vérifications automatiques (secondes). */
+  associationSyncAutoCheckIntervalSec: number
+  /**
+   * PIN utilisé pour envoi / réception auto (si un PIN caisse est défini).
+   * Stocké sur ce poste uniquement — requis pour la synchro auto avec PIN.
+   */
+  associationSyncAutoPin: string | null
+}
+
+export const ASSOCIATION_SYNC_AUTO_CHECK_INTERVAL_MIN_SEC = 3
+export const ASSOCIATION_SYNC_AUTO_CHECK_INTERVAL_MAX_SEC = 3600
+export const ASSOCIATION_SYNC_AUTO_CHECK_INTERVAL_DEFAULT_SEC = 30
+
+export function sanitizeAssociationSyncAutoCheckIntervalSec(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(n)) return ASSOCIATION_SYNC_AUTO_CHECK_INTERVAL_DEFAULT_SEC
+  return Math.min(
+    ASSOCIATION_SYNC_AUTO_CHECK_INTERVAL_MAX_SEC,
+    Math.max(ASSOCIATION_SYNC_AUTO_CHECK_INTERVAL_MIN_SEC, Math.floor(n))
+  )
 }
 
 /** Catégories par défaut (identifiants stables pour migration) */
@@ -182,20 +360,20 @@ export const DEFAULT_CATEGORIES: CategoryConfig[] = [
 ]
 
 export const SEED_PRODUCTS: ProductConfig[] = [
-  { id: 'cafe', name: 'Café', priceCents: 150, category: 'boissons', emoji: '☕', imageFile: null, trackStock: false },
-  { id: 'choco', name: 'Chocolat chaud', priceCents: 250, category: 'boissons', emoji: '🍫', imageFile: null, trackStock: false },
-  { id: 'the', name: 'Thé', priceCents: 150, category: 'boissons', emoji: '🫖', imageFile: null, trackStock: false },
-  { id: 'eau', name: 'Eau 50cl', priceCents: 200, category: 'boissons', emoji: '💧', imageFile: null, trackStock: false },
-  { id: 'soda', name: 'Soda 33cl', priceCents: 300, category: 'boissons', emoji: '🥤', imageFile: null, trackStock: false },
-  { id: 'jus', name: 'Jus de fruit', priceCents: 280, category: 'boissons', emoji: '🧃', imageFile: null, trackStock: false },
-  { id: 'biere', name: 'Bière 50cl', priceCents: 450, category: 'boissons', emoji: '🍺', imageFile: null, trackStock: false },
-  { id: 'vin', name: 'Vin (verre)', priceCents: 400, category: 'boissons', emoji: '🍷', imageFile: null, trackStock: false },
-  { id: 'cidre', name: 'Cidre 33cl', priceCents: 400, category: 'boissons', emoji: '🍎', imageFile: null, trackStock: false },
-  { id: 'sandwich', name: 'Sandwich', priceCents: 450, category: 'repas', emoji: '🥪', imageFile: null, trackStock: false },
-  { id: 'barre', name: 'Barre céréales', priceCents: 150, category: 'repas', emoji: '🍫', imageFile: null, trackStock: false },
-  { id: 'chips', name: 'Chips', priceCents: 200, category: 'repas', emoji: '🥔', imageFile: null, trackStock: false },
-  { id: 'gaufre', name: 'Gaufre', priceCents: 250, category: 'dessert', emoji: '🧇', imageFile: null, trackStock: false },
-  { id: 'crepe', name: 'Crêpe', priceCents: 300, category: 'dessert', emoji: '🥞', imageFile: null, trackStock: false }
+  { id: 'cafe', name: 'Café', priceCents: 150, category: 'boissons', emoji: '☕', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'choco', name: 'Chocolat chaud', priceCents: 250, category: 'boissons', emoji: '🍫', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'the', name: 'Thé', priceCents: 150, category: 'boissons', emoji: '🫖', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'eau', name: 'Eau 50cl', priceCents: 200, category: 'boissons', emoji: '💧', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'soda', name: 'Soda 33cl', priceCents: 300, category: 'boissons', emoji: '🥤', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'jus', name: 'Jus de fruit', priceCents: 280, category: 'boissons', emoji: '🧃', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'biere', name: 'Bière 50cl', priceCents: 450, category: 'boissons', emoji: '🍺', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'vin', name: 'Vin (verre)', priceCents: 400, category: 'boissons', emoji: '🍷', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'cidre', name: 'Cidre 33cl', priceCents: 400, category: 'boissons', emoji: '🍎', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'sandwich', name: 'Sandwich', priceCents: 450, category: 'repas', emoji: '🥪', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'barre', name: 'Barre céréales', priceCents: 150, category: 'repas', emoji: '🍫', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'chips', name: 'Chips', priceCents: 200, category: 'repas', emoji: '🥔', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'gaufre', name: 'Gaufre', priceCents: 250, category: 'dessert', emoji: '🧇', imageFile: null, trackStock: false, lowStockThreshold: null },
+  { id: 'crepe', name: 'Crêpe', priceCents: 300, category: 'dessert', emoji: '🥞', imageFile: null, trackStock: false, lowStockThreshold: null }
 ]
 
 export function defaultPersistedData(): AppPersistedData {
@@ -207,7 +385,12 @@ export function defaultPersistedData(): AppPersistedData {
       licenseAssociationCode: null,
       legalAddress: '',
       siret: '',
-      receiptLegalNote: ''
+      receiptLegalNote: '',
+      receiptLogoWidthPercent: 100,
+      unitTicketValidityNotice: '',
+      unitTicketShowLogo: true,
+      unitTicketShowDateTime: true,
+      unitTicketShowAssociationName: true
     },
     events: [],
     categories: DEFAULT_CATEGORIES.map((c) => ({ ...c })),
@@ -223,12 +406,22 @@ export function defaultPersistedData(): AppPersistedData {
     stockByEvent: {},
     eventSessions: {},
     selectedEventId: null,
-    printing: { deviceName: null, autoPrintTickets: false, silentPrint: true },
+    printing: {
+      deviceName: null,
+      autoPrintTickets: false,
+      silentPrint: true,
+      unitTicketEngine: 'html_chromium',
+      escposCutMode: 'partial',
+      escposPaperWidth: '80mm',
+      escposCutInverted: false
+    },
     security: { pinSalt: '', pinHash: null },
     orderCounter: 0,
     associationBackupPath: null,
     clientDisplayTheme: 'light',
+    cashPaymentUi: 'detail',
     remoteCaisseEnabled: false,
+    remoteCaisseTokenRequired: true,
     remoteCaisseToken: null,
     emailReceipt: {
       enabled: false,
@@ -238,7 +431,14 @@ export function defaultPersistedData(): AppPersistedData {
       user: '',
       password: '',
       fromAddress: ''
-    }
+    },
+    associationServerSnapshotRevision: null,
+    discountMotifs: sanitizeDiscountMotifs(null),
+    autoBackupEnabled: false,
+    autoBackupLastRunDate: null,
+    associationSyncAutoCheckEnabled: true,
+    associationSyncAutoCheckIntervalSec: ASSOCIATION_SYNC_AUTO_CHECK_INTERVAL_DEFAULT_SEC,
+    associationSyncAutoPin: null
   }
 }
 
@@ -252,6 +452,7 @@ export function factoryResetPersistedData(): AppPersistedData {
     associationBackupPath: null,
     clientDisplayTheme: 'light',
     remoteCaisseEnabled: false,
+    remoteCaisseTokenRequired: true,
     remoteCaisseToken: null,
     categories: [{ id: FACTORY_RESET_CATEGORY_ID, label: 'Général', short: '📦' }],
     products: [
@@ -262,7 +463,8 @@ export function factoryResetPersistedData(): AppPersistedData {
         category: FACTORY_RESET_CATEGORY_ID,
         emoji: '🛒',
         imageFile: null,
-        trackStock: false
+        trackStock: false,
+        lowStockThreshold: null
       }
     ]
   }
@@ -285,7 +487,28 @@ export function factoryResetPersistedDataPreservingAssociationIdentity(
       licenseAssociationCode: current.association.licenseAssociationCode,
       legalAddress: current.association.legalAddress ?? '',
       siret: current.association.siret ?? '',
-      receiptLegalNote: current.association.receiptLegalNote ?? ''
-    }
+      receiptLegalNote: current.association.receiptLegalNote ?? '',
+      receiptLogoWidthPercent: clampReceiptLogoWidthPercent(current.association.receiptLogoWidthPercent),
+      unitTicketValidityNotice:
+        typeof current.association.unitTicketValidityNotice === 'string'
+          ? current.association.unitTicketValidityNotice
+          : '',
+      unitTicketShowLogo:
+        typeof current.association.unitTicketShowLogo === 'boolean'
+          ? current.association.unitTicketShowLogo
+          : fresh.association.unitTicketShowLogo,
+      unitTicketShowDateTime:
+        typeof current.association.unitTicketShowDateTime === 'boolean'
+          ? current.association.unitTicketShowDateTime
+          : fresh.association.unitTicketShowDateTime,
+      unitTicketShowAssociationName:
+        typeof current.association.unitTicketShowAssociationName === 'boolean'
+          ? current.association.unitTicketShowAssociationName
+          : fresh.association.unitTicketShowAssociationName
+    },
+    associationServerSnapshotRevision:
+      typeof current.associationServerSnapshotRevision === 'number'
+        ? current.associationServerSnapshotRevision
+        : null
   }
 }

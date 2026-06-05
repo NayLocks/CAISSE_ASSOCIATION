@@ -1,11 +1,14 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { EventItem } from '@shared/catalog'
 import { useAppState } from '@renderer/state/AppStateContext'
+import { useToast } from '@renderer/state/ToastContext'
 import {
   buildSalesPdfBase64,
   buildSalesXlsxBase64,
   safeEventFileName
 } from '@renderer/utils/exportSales'
+import { buildEventClosureStats } from '@renderer/utils/eventClosureStats'
+import { buildEventClosurePdfBase64 } from '@renderer/utils/exportEventClosure'
 import { blurActiveElement, stabilizeFocusAfterDelete } from '@renderer/utils/blurActiveElement'
 import { centsToEurosInput, formatMoney, parseEurosToCents } from '@renderer/utils/money'
 
@@ -13,11 +16,16 @@ function newId(): string {
   return crypto.randomUUID()
 }
 
+const CAISSE_SALES_REFRESH_EVENT = 'caisse-sales-refresh'
+
 export default function EventsView(): JSX.Element {
   const { data, setData } = useAppState()
+  const { showToast } = useToast()
   const [draft, setDraft] = useState({ name: '', date: '', notes: '' })
   const [exportMsg, setExportMsg] = useState<string | null>(null)
   const [floatEdit, setFloatEdit] = useState<{ eventId: string; draft: string } | null>(null)
+  const pendingEventByIdRef = useRef<Record<string, EventItem>>({})
+  const syncTimerByIdRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   const addEvent = useCallback(() => {
     const name = draft.name.trim() || 'Nouvel événement'
@@ -67,14 +75,45 @@ export default function EventsView(): JSX.Element {
     [setData]
   )
 
+  const flushSalesSyncDebounced = useCallback((eventId: string) => {
+    const tPrev = syncTimerByIdRef.current[eventId]
+    if (tPrev) clearTimeout(tPrev)
+    syncTimerByIdRef.current[eventId] = setTimeout(() => {
+      delete syncTimerByIdRef.current[eventId]
+      const ev = pendingEventByIdRef.current[eventId]
+      if (!ev) return
+      void window.caisse
+        .syncEventSalesMetadata({
+          eventId: ev.id,
+          eventName: ev.name,
+          eventDate: ev.date,
+          eventNotes: ev.notes
+        })
+        .then(() => {
+          window.dispatchEvent(new CustomEvent(CAISSE_SALES_REFRESH_EVENT))
+        })
+    }, 450)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      for (const t of Object.values(syncTimerByIdRef.current)) clearTimeout(t)
+    }
+  }, [])
+
   const updateField = useCallback(
-    (id: string, field: keyof EventItem, value: string) => {
-      setData((prev) => ({
-        ...prev,
-        events: prev.events.map((e) => (e.id === id ? { ...e, [field]: value } : e))
-      }))
+    (id: string, field: 'name' | 'date' | 'notes', value: string) => {
+      setData((prev) => {
+        const nextEvents = prev.events.map((e) => (e.id === id ? { ...e, [field]: value } : e))
+        const ev = nextEvents.find((e) => e.id === id)
+        if (ev) {
+          pendingEventByIdRef.current[id] = ev
+          flushSalesSyncDebounced(id)
+        }
+        return { ...prev, events: nextEvents }
+      })
     },
-    [setData]
+    [setData, flushSalesSyncDebounced]
   )
 
   const exportEvent = useCallback(
@@ -129,8 +168,57 @@ export default function EventsView(): JSX.Element {
     [setData]
   )
 
+  const exportClosureReport = useCallback(
+    async (ev: EventItem) => {
+      setExportMsg(null)
+      const all = await window.caisse.listSales()
+      const session = data.eventSessions[ev.id]
+      const floatCents = session?.floatCents ?? 0
+      const stats = buildEventClosureStats(all, ev.id, data.products, floatCents)
+      const b64 = buildEventClosurePdfBase64(ev, stats, {
+        associationName: data.association.name.trim() || 'Association',
+        closedAtIso: new Date().toISOString()
+      })
+      const base = safeEventFileName(ev.name)
+      const r = await window.caisse.saveFileWithDialog({
+        title: 'Rapport de clôture (PDF)',
+        defaultPath: `cloture-${base}.pdf`,
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+        dataBase64: b64
+      })
+      if (r.ok) setExportMsg(`Rapport de clôture enregistré : ${r.path}`)
+      else if (!r.canceled) setExportMsg('Enregistrement du rapport impossible.')
+    },
+    [data.association.name, data.eventSessions, data.products]
+  )
+
+  const duplicateEvent = useCallback(
+    (sourceId: string) => {
+      const src = data.events.find((e) => e.id === sourceId)
+      if (!src) return
+      const name = `${src.name.trim()} (copie)`.slice(0, 120)
+      const ev: EventItem = {
+        id: newId(),
+        name: name || 'Événement (copie)',
+        date: src.date,
+        notes: src.notes,
+        closed: false
+      }
+      const stockCopy = { ...(data.stockByEvent[sourceId] ?? {}) }
+      setData((prev) => ({
+        ...prev,
+        events: [...prev.events, ev],
+        stockByEvent: { ...prev.stockByEvent, [ev.id]: stockCopy },
+        selectedEventId: ev.id
+      }))
+      showToast({ variant: 'success', message: `Événement « ${ev.name} » créé avec le stock initial copié.` })
+    },
+    [data.events, data.stockByEvent, setData, showToast]
+  )
+
   const closeEvent = useCallback(
     (id: string) => {
+      const ev = data.events.find((e) => e.id === id)
       if (
         !confirm(
           'Clôturer cet événement ?\n\nPlus aucun encaissement ni remboursement ne sera possible à la caisse pour cet événement (consultation et exports restent possibles).'
@@ -139,8 +227,11 @@ export default function EventsView(): JSX.Element {
         return
       }
       setClosed(id, true)
+      if (ev && confirm('Générer le rapport de clôture (PDF) maintenant ?')) {
+        void exportClosureReport(ev)
+      }
     },
-    [setClosed]
+    [setClosed, data.events, exportClosureReport]
   )
 
   const reopenEvent = useCallback(
@@ -155,7 +246,7 @@ export default function EventsView(): JSX.Element {
     if (!floatEdit) return
     const c = parseEurosToCents(floatEdit.draft.replace(/\s/g, ''))
     if (c === null) {
-      window.alert('Montant invalide.')
+      showToast({ variant: 'error', message: 'Montant invalide.' })
       return
     }
     const eid = floatEdit.eventId
@@ -171,7 +262,7 @@ export default function EventsView(): JSX.Element {
       }
     })
     setFloatEdit(null)
-  }, [floatEdit, setData])
+  }, [floatEdit, setData, showToast])
 
   return (
     <div className="page">
@@ -180,7 +271,9 @@ export default function EventsView(): JSX.Element {
         <p className="page-desc">
           La caisse est liée à l’<strong>événement actif</strong>. Sélectionnez-le ici ou depuis
           l’en-tête. Vous pouvez aussi <strong>extraire les ventes</strong> de chaque événement en PDF ou
-          Excel.
+          Excel. Si vous modifiez le <strong>nom</strong>, la <strong>date</strong> ou les{' '}
+          <strong>notes</strong> d’un événement, ces libellés sont mis à jour sur toutes les ventes déjà
+          enregistrées pour cet événement (historique, tickets réimprimés).
         </p>
         {exportMsg && <p className="sub export-msg">{exportMsg}</p>}
 
@@ -312,6 +405,20 @@ export default function EventsView(): JSX.Element {
                         Modifier le fond de caisse
                       </button>
                     )}
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => void exportClosureReport(ev)}
+                    >
+                      Rapport clôture
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => duplicateEvent(ev.id)}
+                    >
+                      Dupliquer
+                    </button>
                     <button
                       type="button"
                       className="btn btn-secondary"

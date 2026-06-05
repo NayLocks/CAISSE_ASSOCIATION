@@ -6,6 +6,8 @@ import type {
   AppPersistedData,
   CategoryConfig,
   EmailReceiptConfig,
+  EscposPaperCutMode,
+  EscposPaperWidth,
   EventItem,
   IntegrationsConfig,
   PrintingConfig,
@@ -13,7 +15,14 @@ import type {
   SecurityConfig,
   EventSessionInfo
 } from '../shared/catalog'
-import { defaultPersistedData, DEFAULT_CATEGORIES } from '../shared/catalog'
+import {
+  defaultPersistedData,
+  DEFAULT_CATEGORIES,
+  clampReceiptLogoWidthPercent,
+  sanitizeAssociationSyncAutoCheckIntervalSec,
+  sanitizeDiscountMotifs
+} from '../shared/catalog'
+import { normalizeLicenseAssociationCode } from '../shared/associationCode.js'
 
 const FILE = 'caisse-data.json'
 
@@ -74,13 +83,68 @@ function sanitizePrinting(raw: unknown, fallback: PrintingConfig): PrintingConfi
   if (!raw || typeof raw !== 'object') return { ...fallback }
   const o = raw as Record<string, unknown>
   const dn = o.deviceName
+  const eng = o.unitTicketEngine
+  const unitTicketEngine =
+    eng === 'escpos_raw'
+      ? 'escpos_raw'
+      : eng === 'html_chromium'
+        ? 'html_chromium'
+        : fallback.unitTicketEngine
+  const cut = o.escposCutMode
+  const escposCutMode: EscposPaperCutMode =
+    cut === 'full' ? 'full' : cut === 'partial' ? 'partial' : fallback.escposCutMode
+  const pw = o.escposPaperWidth
+  const escposPaperWidth: EscposPaperWidth =
+    pw === '58mm' || pw === '80mm' ? pw : fallback.escposPaperWidth
+  const escposCutInverted =
+    typeof o.escposCutInverted === 'boolean' ? o.escposCutInverted : fallback.escposCutInverted
   return {
     deviceName: dn === null || dn === undefined ? null : typeof dn === 'string' ? dn : null,
     autoPrintTickets:
       typeof o.autoPrintTickets === 'boolean' ? o.autoPrintTickets : fallback.autoPrintTickets,
     silentPrint:
-      typeof o.silentPrint === 'boolean' ? o.silentPrint : fallback.silentPrint
+      typeof o.silentPrint === 'boolean' ? o.silentPrint : fallback.silentPrint,
+    unitTicketEngine,
+    escposCutMode,
+    escposPaperWidth,
+    escposCutInverted
   }
+}
+
+function sanitizeLowStockThreshold(raw: unknown): number | null {
+  if (raw === null || raw === undefined) return null
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.floor(n))
+}
+
+function sanitizeProducts(raw: ProductConfig[]): ProductConfig[] {
+  const out: ProductConfig[] = []
+  for (const p of raw) {
+    if (!p || typeof p !== 'object') continue
+    const id = typeof p.id === 'string' ? p.id : ''
+    const name = typeof p.name === 'string' ? p.name : ''
+    if (!id || !name.trim()) continue
+    out.push({
+      id,
+      name,
+      priceCents:
+        typeof p.priceCents === 'number' && Number.isFinite(p.priceCents)
+          ? Math.max(0, Math.round(p.priceCents))
+          : 0,
+      category: typeof p.category === 'string' ? p.category : 'boissons',
+      emoji: typeof p.emoji === 'string' && p.emoji ? p.emoji : '📦',
+      imageFile:
+        p.imageFile === undefined || p.imageFile === null || p.imageFile === ''
+          ? null
+          : String(p.imageFile),
+      trackStock: Boolean(p.trackStock),
+      lowStockThreshold: sanitizeLowStockThreshold(
+        (p as { lowStockThreshold?: unknown }).lowStockThreshold
+      )
+    })
+  }
+  return out.length > 0 ? out : defaultPersistedData().products
 }
 
 function fixProductCategories(products: ProductConfig[], categories: CategoryConfig[]): ProductConfig[] {
@@ -218,7 +282,9 @@ function mergeWithDefaults(raw: unknown): AppPersistedData {
   const printing = sanitizePrinting(o.printing, base.printing)
 
   let products: ProductConfig[] =
-    Array.isArray(o.products) && o.products.length > 0 ? (o.products as ProductConfig[]) : base.products
+    Array.isArray(o.products) && o.products.length > 0
+      ? sanitizeProducts(o.products as ProductConfig[])
+      : base.products
   const migrated = migrateLegacyDefaultCategories(categories, products)
   categories = migrated.categories
   products = migrated.products
@@ -244,8 +310,7 @@ function mergeWithDefaults(raw: unknown): AppPersistedData {
     if (raw === null || raw === undefined || raw === '') {
       licenseAssociationCode = null
     } else if (typeof raw === 'string') {
-      const t = raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
-      licenseAssociationCode = t.length >= 2 ? t : null
+      licenseAssociationCode = normalizeLicenseAssociationCode(raw.trim())
     }
   }
 
@@ -272,7 +337,27 @@ function mergeWithDefaults(raw: unknown): AppPersistedData {
       receiptLegalNote:
         assocRaw && typeof assocRaw.receiptLegalNote === 'string'
           ? String(assocRaw.receiptLegalNote)
-          : base.association.receiptLegalNote
+          : base.association.receiptLegalNote,
+      receiptLogoWidthPercent:
+        assocRaw && 'receiptLogoWidthPercent' in assocRaw
+          ? clampReceiptLogoWidthPercent(assocRaw.receiptLogoWidthPercent)
+          : base.association.receiptLogoWidthPercent,
+      unitTicketValidityNotice:
+        assocRaw && typeof assocRaw.unitTicketValidityNotice === 'string'
+          ? String(assocRaw.unitTicketValidityNotice)
+          : base.association.unitTicketValidityNotice,
+      unitTicketShowLogo:
+        assocRaw && typeof assocRaw.unitTicketShowLogo === 'boolean'
+          ? assocRaw.unitTicketShowLogo
+          : base.association.unitTicketShowLogo,
+      unitTicketShowDateTime:
+        assocRaw && typeof assocRaw.unitTicketShowDateTime === 'boolean'
+          ? assocRaw.unitTicketShowDateTime
+          : base.association.unitTicketShowDateTime,
+      unitTicketShowAssociationName:
+        assocRaw && typeof assocRaw.unitTicketShowAssociationName === 'boolean'
+          ? assocRaw.unitTicketShowAssociationName
+          : base.association.unitTicketShowAssociationName
     },
     events,
     categories,
@@ -300,15 +385,49 @@ function mergeWithDefaults(raw: unknown): AppPersistedData {
       o.clientDisplayTheme === 'light' || o.clientDisplayTheme === 'dark'
         ? o.clientDisplayTheme
         : base.clientDisplayTheme,
+    cashPaymentUi: o.cashPaymentUi === 'express' ? 'express' : base.cashPaymentUi,
     remoteCaisseEnabled:
       typeof o.remoteCaisseEnabled === 'boolean' ? o.remoteCaisseEnabled : base.remoteCaisseEnabled,
+    remoteCaisseTokenRequired:
+      typeof o.remoteCaisseTokenRequired === 'boolean'
+        ? o.remoteCaisseTokenRequired
+        : base.remoteCaisseTokenRequired,
     remoteCaisseToken:
       o.remoteCaisseToken === null || o.remoteCaisseToken === undefined
         ? base.remoteCaisseToken
         : typeof o.remoteCaisseToken === 'string' && o.remoteCaisseToken.length > 0
           ? o.remoteCaisseToken
           : base.remoteCaisseToken,
-    emailReceipt
+    emailReceipt,
+    associationServerSnapshotRevision:
+      typeof o.associationServerSnapshotRevision === 'number' &&
+      Number.isFinite(o.associationServerSnapshotRevision)
+        ? Math.max(0, Math.floor(o.associationServerSnapshotRevision))
+        : o.associationServerSnapshotRevision === null
+          ? null
+          : base.associationServerSnapshotRevision,
+    discountMotifs: sanitizeDiscountMotifs(o.discountMotifs),
+    autoBackupEnabled:
+      typeof o.autoBackupEnabled === 'boolean' ? o.autoBackupEnabled : base.autoBackupEnabled,
+    autoBackupLastRunDate:
+      typeof o.autoBackupLastRunDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(o.autoBackupLastRunDate)
+        ? o.autoBackupLastRunDate
+        : o.autoBackupLastRunDate === null
+          ? null
+          : base.autoBackupLastRunDate,
+    associationSyncAutoCheckEnabled:
+      typeof o.associationSyncAutoCheckEnabled === 'boolean'
+        ? o.associationSyncAutoCheckEnabled
+        : base.associationSyncAutoCheckEnabled,
+    associationSyncAutoCheckIntervalSec: sanitizeAssociationSyncAutoCheckIntervalSec(
+      o.associationSyncAutoCheckIntervalSec ?? base.associationSyncAutoCheckIntervalSec
+    ),
+    associationSyncAutoPin:
+      typeof o.associationSyncAutoPin === 'string'
+        ? o.associationSyncAutoPin.slice(0, 64)
+        : o.associationSyncAutoPin === null
+          ? null
+          : base.associationSyncAutoPin
   }
 }
 

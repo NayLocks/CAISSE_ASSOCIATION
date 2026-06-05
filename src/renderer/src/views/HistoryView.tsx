@@ -4,7 +4,9 @@ import type { TicketUnitPayload } from '@shared/ticket'
 import { receiptLegalInfoFromAssociation } from '@shared/catalog'
 import { buildSummaryReceiptPlainText } from '@shared/receiptPlain'
 import { formatMoney } from '@renderer/utils/money'
+import EmptyState from '@renderer/components/EmptyState'
 import { formatOrderDisplay } from '@renderer/utils/order'
+import { formatOrderLabel } from '@shared/orderDigits'
 import { useAppState } from '@renderer/state/AppStateContext'
 import { useShellNav } from '@renderer/state/ShellNavContext'
 import {
@@ -12,6 +14,7 @@ import {
   buildSalesXlsxBase64,
   safeEventFileName
 } from '@renderer/utils/exportSales'
+import { applyHistoryAdvancedFilters } from '@renderer/utils/historySalesFilter'
 
 function paymentShort(s: SaleRecord): string {
   const p = s.payment
@@ -59,6 +62,13 @@ export default function HistoryView(): JSX.Element {
   const [emailMsg, setEmailMsg] = useState<string | null>(null)
   const [eventFilter, setEventFilter] = useState<string | 'all'>('all')
   const [exportMsg, setExportMsg] = useState<string | null>(null)
+  type HistoryQuick = 'off' | 'today' | 'this_event' | 'refunds'
+  const [historyQuick, setHistoryQuick] = useState<HistoryQuick>('off')
+  const [advOrder, setAdvOrder] = useState('')
+  const [advAmountMin, setAdvAmountMin] = useState('')
+  const [advAmountMax, setAdvAmountMax] = useState('')
+  const [advPayment, setAdvPayment] = useState<'all' | 'cash' | 'card' | 'mixed'>('all')
+  const [advProduct, setAdvProduct] = useState('')
 
   const reload = (): void => {
     void window.caisse
@@ -72,14 +82,47 @@ export default function HistoryView(): JSX.Element {
   }, [data.orderCounter, data.events.length])
 
   useEffect(() => {
+    const onRefresh = (): void => {
+      reload()
+    }
+    window.addEventListener('caisse-sales-refresh', onRefresh)
+    return () => window.removeEventListener('caisse-sales-refresh', onRefresh)
+  }, [reload])
+
+  useEffect(() => {
     setEmailTo('')
     setEmailMsg(null)
   }, [detail?.id])
 
   const filteredSales = useMemo(() => {
-    if (eventFilter === 'all') return sales
-    return sales.filter((s) => s.eventId === eventFilter)
-  }, [sales, eventFilter])
+    let rows = sales
+    if (eventFilter !== 'all') rows = rows.filter((s) => s.eventId === eventFilter)
+    if (historyQuick === 'today') {
+      const start = new Date()
+      start.setHours(0, 0, 0, 0)
+      const end = new Date(start)
+      end.setDate(end.getDate() + 1)
+      const t0 = start.getTime()
+      const t1 = end.getTime()
+      rows = rows.filter((s) => {
+        const t = new Date(s.at).getTime()
+        return t >= t0 && t < t1
+      })
+    } else if (historyQuick === 'this_event') {
+      if (data.selectedEventId) {
+        rows = rows.filter((s) => s.eventId === data.selectedEventId)
+      }
+    } else if (historyQuick === 'refunds') {
+      rows = rows.filter((s) => s.kind === 'refund')
+    }
+    return applyHistoryAdvancedFilters(rows, {
+      orderQuery: advOrder,
+      amountMinEuros: advAmountMin,
+      amountMaxEuros: advAmountMax,
+      paymentMode: advPayment,
+      productQuery: advProduct
+    })
+  }, [sales, eventFilter, historyQuick, data.selectedEventId, advOrder, advAmountMin, advAmountMax, advPayment, advProduct])
 
   const exportForEvent = useMemo(() => {
     if (eventFilter === 'all' || filteredSales.length === 0) return null
@@ -203,7 +246,7 @@ export default function HistoryView(): JSX.Element {
     const legal = receiptLegalInfoFromAssociation(data.association)
     const ordSubject =
       detail.orderNumber != null && detail.orderNumber > 0
-        ? `Cde N°${String(detail.orderNumber).padStart(6, '0')}`
+        ? formatOrderLabel(detail.orderNumber)
         : 'Ticket caisse'
     const evName = detail.eventName.trim() || 'Événement'
     const assoName = detail.associationName.trim() || data.association.name.trim() || 'Caisse'
@@ -259,7 +302,8 @@ export default function HistoryView(): JSX.Element {
             </button>
           </div>
         </div>
-        <div className="history-toolbar">
+        <div className="history-toolbar history-toolbar-row history-toolbar--tiered">
+          <div className="history-toolbar-cluster history-toolbar-cluster--filters">
           <label className="field inline-field">
             <span>Filtrer par événement</span>
             <select
@@ -279,6 +323,89 @@ export default function HistoryView(): JSX.Element {
               ))}
             </select>
           </label>
+          <div className="history-quick-filters" role="group" aria-label="Filtres rapides">
+            <span>Filtres rapides</span>
+            <button
+              type="button"
+              className={`btn btn-secondary btn-compact${historyQuick === 'today' ? ' is-active' : ''}`}
+              onClick={() => {
+                setHistoryQuick((q) => (q === 'today' ? 'off' : 'today'))
+                setExportMsg(null)
+              }}
+            >
+              Aujourd’hui
+            </button>
+            <button
+              type="button"
+              className={`btn btn-secondary btn-compact${historyQuick === 'this_event' ? ' is-active' : ''}`}
+              disabled={!data.selectedEventId}
+              title={
+                data.selectedEventId
+                  ? 'Limite aux ventes de l’événement actuellement sélectionné dans l’en-tête'
+                  : 'Sélectionnez un événement dans l’en-tête'
+              }
+              onClick={() => {
+                setHistoryQuick((q) => (q === 'this_event' ? 'off' : 'this_event'))
+                setExportMsg(null)
+              }}
+            >
+              Événement en-tête
+            </button>
+            <button
+              type="button"
+              className={`btn btn-secondary btn-compact${historyQuick === 'refunds' ? ' is-active' : ''}`}
+              onClick={() => {
+                setHistoryQuick((q) => (q === 'refunds' ? 'off' : 'refunds'))
+                setExportMsg(null)
+              }}
+            >
+              Remboursements
+            </button>
+          </div>
+          </div>
+          <div className="history-advanced-filters">
+            <label className="field inline-field">
+              <span>N° commande</span>
+              <input type="text" value={advOrder} placeholder="ex. 042" onChange={(e) => setAdvOrder(e.target.value)} />
+            </label>
+            <label className="field inline-field">
+              <span>Montant min (€)</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={advAmountMin}
+                onChange={(e) => setAdvAmountMin(e.target.value)}
+              />
+            </label>
+            <label className="field inline-field">
+              <span>Montant max (€)</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={advAmountMax}
+                onChange={(e) => setAdvAmountMax(e.target.value)}
+              />
+            </label>
+            <label className="field inline-field">
+              <span>Paiement</span>
+              <select value={advPayment} onChange={(e) => setAdvPayment(e.target.value as typeof advPayment)}>
+                <option value="all">Tous</option>
+                <option value="cash">Espèces</option>
+                <option value="card">Carte</option>
+                <option value="mixed">Mixte</option>
+              </select>
+            </label>
+            <label className="field inline-field grow">
+              <span>Article</span>
+              <input
+                type="search"
+                value={advProduct}
+                placeholder="Nom ou id article"
+                onChange={(e) => setAdvProduct(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="history-toolbar-cluster history-toolbar-cluster--exports">
           <div className="history-export-btns">
             <button
               type="button"
@@ -296,6 +423,7 @@ export default function HistoryView(): JSX.Element {
             >
               Excel
             </button>
+          </div>
           </div>
         </div>
         {exportMsg && <p className="sub export-msg">{exportMsg}</p>}
@@ -316,20 +444,43 @@ export default function HistoryView(): JSX.Element {
             <tbody>
               {sales.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="muted center-pad">
-                    Aucune vente enregistrée pour l’instant.
+                  <td colSpan={7} className="history-empty-cell">
+                    <EmptyState
+                      icon="📜"
+                      title="Aucune vente enregistrée"
+                      description="Les ventes validées sur cette caisse apparaîtront ici. Encaissez une commande ou cliquez sur « Actualiser » après une session."
+                      density="compact"
+                    />
                   </td>
                 </tr>
               ) : filteredSales.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="muted center-pad">
-                    Aucune vente pour l’événement sélectionné.
+                  <td colSpan={7} className="history-empty-cell">
+                    <EmptyState
+                      icon="🔍"
+                      title="Aucun résultat avec ces filtres"
+                      description="Élargissez le filtre événement ou désactivez les filtres rapides (aujourd’hui, événement en-tête, remboursements)."
+                      density="compact"
+                      actions={
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() => {
+                            setEventFilter('all')
+                            setHistoryQuick('off')
+                            setExportMsg(null)
+                          }}
+                        >
+                          Réinitialiser les filtres
+                        </button>
+                      }
+                    />
                   </td>
                 </tr>
               ) : (
                 filteredSales.map((s) => (
                   <tr key={s.id} className={s.kind === 'refund' ? 'hist-row-refund' : undefined}>
-                    <td className="mono">{formatOrderDisplay(s.orderNumber)}</td>
+                    <td className="mono hist-cde-no">{formatOrderDisplay(s.orderNumber)}</td>
                     <td className="mono td-nowrap">
                       {new Date(s.at).toLocaleString('fr-FR')}
                     </td>
@@ -401,7 +552,7 @@ export default function HistoryView(): JSX.Element {
             <p className="sub mono">
               {detail.orderNumber != null && detail.orderNumber > 0 ? (
                 <>
-                  <strong>Commande {formatOrderDisplay(detail.orderNumber)}</strong> ·{' '}
+                  <strong className="hist-cde-no">{formatOrderDisplay(detail.orderNumber)}</strong> ·{' '}
                 </>
               ) : null}
               {new Date(detail.at).toLocaleString('fr-FR')}
@@ -425,7 +576,7 @@ export default function HistoryView(): JSX.Element {
                     <span className="hist-k">Lié à</span>
                     <span>
                       {detail.refundSourceOrderNumber != null && detail.refundSourceOrderNumber > 0
-                        ? `Commande ${formatOrderDisplay(detail.refundSourceOrderNumber)}`
+                        ? formatOrderDisplay(detail.refundSourceOrderNumber)
                         : 'Vente source'}
                       {detail.refundSourceSaleId ? (
                         <span className="muted mono hist-refund-id"> · {detail.refundSourceSaleId.slice(0, 8)}…</span>

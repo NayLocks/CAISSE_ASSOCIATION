@@ -2,9 +2,22 @@ import { app, BrowserWindow } from 'electron'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { registerIpc } from './ipc'
+import { runStartupLicenseDataRefreshIfOnline } from './licenseDataRefresh.js'
+import { scheduleLaunchUpdateCheck } from './launchUpdateCheck.js'
 import { startClientDisplayServer } from './clientDisplayServer.js'
 import { startRemoteCaisseServer } from './remoteCaisseServer.js'
 import { migrateLegacyIfNeeded } from './associationRegistry.js'
+import { startScheduledAutoBackup } from './scheduledBackup.js'
+import { startAssociationAutoSync } from './associationAutoSync.js'
+
+/**
+ * Doit être **strictement identique** à `build.appId` dans package.json.
+ * Sans cela, Windows traite chaque version comme une autre app : épingle barre des tâches perdue,
+ * raccourcis dupliqués, impression de « désinstallation + réinstallation ».
+ */
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.buvette.caisse')
+}
 
 migrateLegacyIfNeeded()
 registerIpc()
@@ -42,6 +55,7 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
     mainWindow.focus()
+    scheduleLaunchUpdateCheck(mainWindow)
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
@@ -53,6 +67,9 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   createWindow()
+  startScheduledAutoBackup()
+  startAssociationAutoSync()
+  void runStartupLicenseDataRefreshIfOnline()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

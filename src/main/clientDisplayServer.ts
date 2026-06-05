@@ -344,7 +344,7 @@ function buildHtml(): string {
   }
   .overlay h2 { margin: 0 0 0.5rem; font-size: clamp(1.35rem, 4.2vw, 2rem); line-height: 1.2; }
   .overlay .big { font-size: clamp(2rem, 7vw, 3.5rem); font-weight: 800; color: var(--ok); margin: 0.5rem 0; }
-  .overlay .order { font-family: ui-monospace, monospace; font-size: clamp(1rem, 3vw, 1.35rem); color: var(--accent); margin-top: 0.75rem; }
+  .overlay .order { font-family: ui-monospace, monospace; font-size: clamp(0.82rem, 2.5vw, 1.05rem); font-weight: 600; color: var(--accent); margin-top: 0.75rem; }
   .pay-client-sub { color: #94a3b8; font-size: clamp(0.95rem, 2.8vw, 1.15rem); margin: 0.5rem 0 1rem; line-height: 1.45; }
   .pay-client-total { font-size: clamp(1.5rem, 5vw, 2.25rem); font-weight: 800; color: var(--accent); text-align: center; margin-top: 0.5rem; font-variant-numeric: tabular-nums; }
   .pay-client-total.muted { color: #64748b; }

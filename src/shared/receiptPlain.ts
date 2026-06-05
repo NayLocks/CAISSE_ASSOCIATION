@@ -1,13 +1,14 @@
 import type { SaleRecord } from './sales'
 import type { ReceiptLegalInfo } from './catalog'
 import { tvaMentionLines } from './catalog'
+import { formatOrderLabel } from './orderDigits.js'
 
 function formatMoney(cents: number): string {
   return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(cents / 100)
 }
 
 function formatOrderNo(n: number): string {
-  return `N° ${String(n).padStart(6, '0')}`
+  return formatOrderLabel(n)
 }
 
 function paymentLinesPlain(s: SaleRecord): string[] {
@@ -90,7 +91,7 @@ export function buildSummaryReceiptPlainText(sale: SaleRecord, legal: ReceiptLeg
   head.push(`${totalLabel} : ${formatMoney(sale.totalCents)}`)
   for (const pl of paymentLinesPlain(sale)) head.push(pl)
   if (sale.kind === 'refund' && sale.refundSourceOrderNumber != null && sale.refundSourceOrderNumber > 0) {
-    head.push(`Commande d’origine : ${formatOrderNo(sale.refundSourceOrderNumber)}`)
+    head.push(`Vente d’origine : ${formatOrderNo(sale.refundSourceOrderNumber)}`)
   }
   head.push('')
   head.push(sale.kind === 'refund' ? 'Remboursement enregistré.' : 'Merci de votre visite.')

@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ProductConfig } from '@shared/catalog'
 import { getStockMap, initProductStockAcrossEvents, removeProductFromAllStock } from '@shared/inventory'
 import { useAppState } from '@renderer/state/AppStateContext'
+import { useToast } from '@renderer/state/ToastContext'
 import { centsToEurosInput, parseEurosToCents } from '@renderer/utils/money'
 import { blurActiveElement, stabilizeFocusAfterDelete } from '@renderer/utils/blurActiveElement'
 import { blurNativeSelectSoon } from '@renderer/utils/blurNativeSelect'
 import { EMOJI_CHOICES } from '@renderer/data/emojiChoices'
+import EmptyState from '@renderer/components/EmptyState'
+import { parseArticlesCsv } from '@renderer/utils/articlesCsvImport'
 
 function newId(): string {
   return crypto.randomUUID()
@@ -13,7 +16,9 @@ function newId(): string {
 
 export default function ArticlesView(): JSX.Element {
   const { data, setData } = useAppState()
+  const { showToast } = useToast()
   const eventId = data.selectedEventId
+  const csvInputRef = useRef<HTMLInputElement>(null)
   const stockMap = getStockMap(data, eventId)
   const [imgMap, setImgMap] = useState<Record<string, string>>({})
   const imgSig = useMemo(
@@ -90,13 +95,87 @@ export default function ArticlesView(): JSX.Element {
       category: defaultCategoryId,
       emoji: '📦',
       imageFile: null,
-      trackStock: false
+      trackStock: false,
+      lowStockThreshold: null
     }
     setData((prev) => ({
       ...prev,
       products: [...prev.products, product]
     }))
   }, [defaultCategoryId, setData])
+
+  const duplicateProduct = useCallback(
+    (p: ProductConfig) => {
+      const nid = newId()
+      setData((prev) => {
+        const nextP: ProductConfig = {
+          id: nid,
+          name: `${p.name.trim()} (copie)`,
+          priceCents: p.priceCents,
+          category: p.category,
+          emoji: p.emoji,
+          imageFile: null,
+          trackStock: p.trackStock,
+          lowStockThreshold: p.lowStockThreshold
+        }
+        let stockByEvent = prev.stockByEvent
+        if (nextP.trackStock) {
+          const eids = prev.events.map((e) => e.id)
+          stockByEvent = initProductStockAcrossEvents(stockByEvent, eids, nid)
+          for (const eid of eids) {
+            const q = prev.stockByEvent[eid]?.[p.id] ?? 0
+            stockByEvent = {
+              ...stockByEvent,
+              [eid]: { ...(stockByEvent[eid] ?? {}), [nid]: q }
+            }
+          }
+        }
+        return { ...prev, products: [...prev.products, nextP], stockByEvent }
+      })
+    },
+    [setData]
+  )
+
+  const onArticlesCsv = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ''
+      if (!file) return
+      const text = await file.text()
+      const { rows, errors } = parseArticlesCsv(text, data.categories, defaultCategoryId)
+      if (rows.length === 0) {
+        showToast({
+          variant: 'error',
+          message: errors.length ? errors.slice(0, 4).join(' ') : 'Aucune ligne importée.'
+        })
+        return
+      }
+      if (errors.length) {
+        showToast({
+          variant: 'warning',
+          message: `${rows.length} article(s) ajouté(s). ${errors.length} ligne(s) ignorée(s).`
+        })
+      } else {
+        showToast({ message: `${rows.length} article(s) importé(s).` })
+      }
+      setData((prev) => {
+        const additions: ProductConfig[] = rows.map((r) => ({ ...r, id: newId() }))
+        let stockByEvent = prev.stockByEvent
+        for (const p of additions) {
+          if (p.trackStock) {
+            const eids = prev.events.map((ev) => ev.id)
+            stockByEvent = initProductStockAcrossEvents(stockByEvent, eids, p.id)
+          }
+        }
+        return {
+          ...prev,
+          products: [...prev.products, ...additions],
+          stockByEvent
+        }
+      })
+    },
+    [data.categories, defaultCategoryId, setData, showToast]
+  )
 
   const pickProductImage = useCallback(
     async (id: string) => {
@@ -159,12 +238,25 @@ export default function ArticlesView(): JSX.Element {
             <h2 className="page-title">Articles</h2>
             <p className="page-desc">
               Prix, catégorie, <strong>icône article</strong> (liste dédiée aux articles ou saisie libre) et stock
-              optionnel par <strong>événement actif</strong> (sélection dans l’en-tête).
+              optionnel par <strong>événement actif</strong> (sélection dans l’en-tête). Import CSV : en-tête{' '}
+              <span className="mono">nom, prix, categorie, emoji, suivi_stock</span> (séparateur virgule ou point-virgule).
             </p>
           </div>
-          <button type="button" className="btn btn-primary" onClick={addArticle}>
-            + Article
-          </button>
+          <div className="page-head-actions">
+            <input
+              ref={csvInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="sr-only"
+              onChange={(ev) => void onArticlesCsv(ev)}
+            />
+            <button type="button" className="btn btn-secondary" onClick={() => csvInputRef.current?.click()}>
+              Importer CSV…
+            </button>
+            <button type="button" className="btn btn-primary" onClick={addArticle}>
+              + Article
+            </button>
+          </div>
         </div>
         {!eventId && (
           <p className="banner-warn articles-event-warn">
@@ -172,6 +264,25 @@ export default function ArticlesView(): JSX.Element {
           </p>
         )}
 
+        {data.products.length === 0 ? (
+          <div className="table-wrap articles-empty-wrap">
+            <EmptyState
+              icon="📦"
+              title="Aucun article"
+              description="Créez votre premier article ou importez une liste au format CSV (voir l’aide en tête de page)."
+              actions={
+                <>
+                  <button type="button" className="btn btn-primary" onClick={addArticle}>
+                    + Article
+                  </button>
+                  <button type="button" className="btn btn-secondary" onClick={() => csvInputRef.current?.click()}>
+                    Importer CSV…
+                  </button>
+                </>
+              }
+            />
+          </div>
+        ) : (
         <div className="table-wrap">
           <table className="data-table">
             <thead>
@@ -183,6 +294,7 @@ export default function ArticlesView(): JSX.Element {
                 <th>Catégorie</th>
                 <th>Stock suivi</th>
                 <th>Quantité</th>
+                <th>Seuil alerte</th>
                 <th></th>
               </tr>
             </thead>
@@ -311,14 +423,43 @@ export default function ArticlesView(): JSX.Element {
                         <span className="muted td-dash">—</span>
                       )}
                     </td>
+                    <td>
+                      {p.trackStock ? (
+                        <input
+                          type="number"
+                          min={0}
+                          className="input-inline narrow mono"
+                          title="Alerte caisse si stock ≤ ce seuil (vide = pas d’alerte)"
+                          value={p.lowStockThreshold ?? ''}
+                          placeholder="—"
+                          onChange={(e) => {
+                            const raw = e.target.value.trim()
+                            updateProduct(p.id, {
+                              lowStockThreshold: raw === '' ? null : Math.max(0, Math.floor(Number(raw)))
+                            })
+                          }}
+                        />
+                      ) : (
+                        <span className="muted td-dash">—</span>
+                      )}
+                    </td>
                     <td className="td-actions">
-                      <button
-                        type="button"
-                        className="btn btn-ghost danger"
-                        onClick={() => removeProduct(p.id)}
-                      >
-                        Supprimer
-                      </button>
+                      <div className="article-row-actions">
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-compact"
+                          onClick={() => duplicateProduct(p)}
+                        >
+                          Dupliquer
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost danger"
+                          onClick={() => removeProduct(p.id)}
+                        >
+                          Supprimer
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -326,6 +467,7 @@ export default function ArticlesView(): JSX.Element {
             </tbody>
           </table>
         </div>
+        )}
       </div>
     </div>
   )

@@ -45,6 +45,30 @@ export function findSaleByOrderForEvent(orderNumber: number, eventId: string): S
   return load().find((s) => s.orderNumber === orderNumber && s.eventId === eventId)
 }
 
+/** Recopie nom / date / notes d’un événement sur toutes les ventes déjà enregistrées pour cet `eventId`. */
+export function applyEventMetadataToSales(
+  eventId: string,
+  meta: { eventName: string; eventDate: string; eventNotes: string }
+): { updated: number } {
+  const sales = load()
+  let updated = 0
+  const next = sales.map((s) => {
+    if (s.eventId !== eventId) return s
+    const d = typeof s.eventDate === 'string' ? s.eventDate : ''
+    const n = typeof s.eventNotes === 'string' ? s.eventNotes : ''
+    if (s.eventName === meta.eventName && d === meta.eventDate && n === meta.eventNotes) return s
+    updated += 1
+    return {
+      ...s,
+      eventName: meta.eventName,
+      eventDate: meta.eventDate,
+      eventNotes: meta.eventNotes
+    }
+  })
+  if (updated > 0) save(next)
+  return { updated }
+}
+
 /** Vide l’historique des ventes (fichier sur disque recréé vide). */
 export function clearSalesHistory(): void {
   const p = path()

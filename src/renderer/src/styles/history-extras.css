@@ -1,0 +1,51 @@
+.history-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem 1.25rem;
+}
+
+.history-quick-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.history-quick-filters > span {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-right: 0.15rem;
+}
+
+.history-quick-filters .btn-compact {
+  padding: 0.35rem 0.65rem;
+  font-size: 0.85rem;
+}
+
+.history-advanced-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem 0.75rem;
+  width: 100%;
+  padding: 0.35rem 0 0.15rem;
+  border-top: 1px solid var(--border);
+  margin-top: 0.35rem;
+}
+
+.history-advanced-filters .field {
+  min-width: 7rem;
+}
+
+.history-advanced-filters .field.grow {
+  flex: 1;
+  min-width: 10rem;
+}
+
+.article-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: stretch;
+}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useFocusTrap } from '@renderer/hooks/useFocusTrap'
 import type { ClientPaymentDetail } from '@shared/clientDisplay'
 import type { SalePayment } from '@shared/sales'
 import { EUR_DENOMINATIONS } from '@renderer/payment/denominations'
@@ -22,6 +23,11 @@ type Props = {
   initialStep?: Step
   /** Affichage client (navigateur) : synchronise le détail du paiement */
   onPaymentDisplayUpdate?: (detail: ClientPaymentDetail | null) => void
+  /**
+   * Espèces : `detail` = pièces/billets tout de suite ; `express` = encais montant exact mis en avant,
+   * grille désignatif sur demande (reste par carte inchangé si complément).
+   */
+  cashPaymentUi?: 'detail' | 'express'
 }
 
 const SUMUP_POLL_MS = 2500
@@ -36,7 +42,8 @@ export default function PaymentModal({
   sumupTerminalAuto = false,
   refundMode = false,
   initialStep = 'choose',
-  onPaymentDisplayUpdate
+  onPaymentDisplayUpdate,
+  cashPaymentUi = 'detail'
 }: Props): JSX.Element | null {
   const effectiveSumup = sumupConfigured && !refundMode
   const effectiveTermAuto = sumupTerminalAuto && !refundMode
@@ -54,6 +61,10 @@ export default function PaymentModal({
     { kind: 'reader' } | { kind: 'online'; checkoutId: string } | null
   >(null)
   const sumupAbortedRef = useRef(false)
+  const [cashDetailOpen, setCashDetailOpen] = useState(false)
+  const overlayRef = useRef<HTMLDivElement>(null)
+
+  useFocusTrap(overlayRef, open)
 
   useEffect(() => {
     if (!open) return
@@ -64,6 +75,7 @@ export default function PaymentModal({
     setCardChargeCents(null)
     setSumupPhase('idle')
     setSumupErr(null)
+    setCashDetailOpen(refundMode || cashPaymentUi !== 'express')
     terminalAutoStartedRef.current = false
     sumupSessionRef.current = null
     sumupAbortedRef.current = false
@@ -71,7 +83,7 @@ export default function PaymentModal({
       clearInterval(pollRef.current)
       pollRef.current = null
     }
-  }, [open, totalCents, initialStep, refundMode])
+  }, [open, totalCents, initialStep, refundMode, cashPaymentUi])
 
   useEffect(() => {
     return () => {
@@ -190,7 +202,7 @@ export default function PaymentModal({
       setSumupPhase('error')
       setSumupErr(
         r.error === 'not_configured'
-          ? 'SumUp non configuré (menu SumUp).'
+          ? 'SumUp non configuré (menu Encaissement / SumUp).'
           : typeof r.error === 'string'
             ? r.error
             : 'Erreur SumUp'
@@ -373,9 +385,11 @@ export default function PaymentModal({
 
   const coins = EUR_DENOMINATIONS.filter((d) => d.kind === 'coin')
   const notes = EUR_DENOMINATIONS.filter((d) => d.kind === 'note')
+  const showDenominationUi = refundMode || cashPaymentUi !== 'express' || cashDetailOpen
 
   return (
     <div
+      ref={overlayRef}
       className="overlay"
       role="dialog"
       aria-modal="true"
@@ -393,7 +407,15 @@ export default function PaymentModal({
           <div className="pay-choose">
             <p className="sub">{refundMode ? 'Comment effectuer le remboursement' : 'Choisissez le mode de règlement'}</p>
             <div className="pay-mode-btns">
-              <button type="button" className="btn btn-pay-lg" onClick={() => setStep('cash')}>
+              <button
+                type="button"
+                className="btn btn-pay-lg"
+                onClick={() => {
+                  setCashGiven(0)
+                  setCashDetailOpen(refundMode || cashPaymentUi !== 'express')
+                  setStep('cash')
+                }}
+              >
                 Espèces
               </button>
               <button
@@ -551,7 +573,9 @@ export default function PaymentModal({
             <p className="sub">
               {refundMode
                 ? 'Indiquez les espèces remises au client (tap sur les vignettes), ou validez directement le montant exact.'
-                : 'Indiquez les pièces et billets reçus du client (tap sur les vignettes), ou encaissez le montant exact en un clic.'}
+                : cashPaymentUi === 'express'
+                  ? 'Encais rapide : validez le montant exact. Si le client paie une partie en espèces puis le solde par carte, affichez le compteur pièces / billets ci-dessous.'
+                  : 'Indiquez les pièces et billets reçus du client (tap sur les vignettes), ou encaissez le montant exact en un clic.'}
             </p>
             {totalCents >= 0 && (
               <button
@@ -566,36 +590,60 @@ export default function PaymentModal({
                     : 'Valider la vente à 0,00 € (espèces)'}
               </button>
             )}
-            <div className="denom-section">
-              <span className="denom-title">Pièces</span>
-              <div className="denom-grid">
-                {coins.map((d) => (
+            {!showDenominationUi ? (
+              <button
+                type="button"
+                className="btn btn-secondary btn-block-pay"
+                onClick={() => setCashDetailOpen(true)}
+              >
+                Compter avec pièces et billets (2&nbsp;€, 10&nbsp;€…)
+              </button>
+            ) : (
+              <>
+                {cashPaymentUi === 'express' && !refundMode && (
                   <button
-                    key={d.cents}
                     type="button"
-                    className="denom-chip"
-                    onClick={() => addDenom(d.cents)}
+                    className="btn btn-ghost btn-block-pay cash-denom-collapse"
+                    onClick={() => {
+                      clearCash()
+                      setCashDetailOpen(false)
+                    }}
                   >
-                    {d.label}
+                    Masquer pièces / billets
                   </button>
-                ))}
-              </div>
-            </div>
-            <div className="denom-section">
-              <span className="denom-title">Billets</span>
-              <div className="denom-grid denom-notes">
-                {notes.map((d) => (
-                  <button
-                    key={d.cents}
-                    type="button"
-                    className="denom-chip denom-note"
-                    onClick={() => addDenom(d.cents)}
-                  >
-                    {d.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+                )}
+                <div className="denom-section">
+                  <span className="denom-title">Pièces</span>
+                  <div className="denom-grid">
+                    {coins.map((d) => (
+                      <button
+                        key={d.cents}
+                        type="button"
+                        className="denom-chip"
+                        onClick={() => addDenom(d.cents)}
+                      >
+                        {d.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="denom-section">
+                  <span className="denom-title">Billets</span>
+                  <div className="denom-grid denom-notes">
+                    {notes.map((d) => (
+                      <button
+                        key={d.cents}
+                        type="button"
+                        className="denom-chip denom-note"
+                        onClick={() => addDenom(d.cents)}
+                      >
+                        {d.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
 
             <div className="pay-summary">
               <div className="pay-row">

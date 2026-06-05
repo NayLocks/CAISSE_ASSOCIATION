@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 type Mode = 'setup' | 'login'
 
@@ -7,11 +7,14 @@ const MAX_LEN = 32
 export default function PinPanel({
   mode,
   title,
-  onSuccess
+  onSuccess,
+  /** Retour à l’écran précédent (ex. liste des associations) — désactivé si absent. */
+  onBack
 }: {
   mode: Mode
   title?: string
   onSuccess: () => void | Promise<void>
+  onBack?: () => void
 }): JSX.Element {
   const [pin, setPin] = useState('')
   const [pin2, setPin2] = useState('')
@@ -28,6 +31,21 @@ export default function PinPanel({
     }, 50)
     return () => window.clearTimeout(t)
   }, [mode])
+
+  useEffect(() => {
+    if (!onBack || busy) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setPin('')
+        setPin2('')
+        setErr(null)
+        onBack()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onBack, busy])
 
   const appendDigit = useCallback(
     (d: string) => {
@@ -117,6 +135,14 @@ export default function PinPanel({
     else void submitSetup()
   }
 
+  const handleBack = useCallback(() => {
+    if (busy || !onBack) return
+    setPin('')
+    setPin2('')
+    setErr(null)
+    onBack()
+  }, [busy, onBack])
+
   const digits = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
 
   return (
@@ -126,7 +152,32 @@ export default function PinPanel({
       onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="auth-card auth-card-pin" role="document" onMouseDown={(e) => e.stopPropagation()}>
-        <h2 className="auth-title">{title ?? (mode === 'setup' ? 'Créer un code PIN' : 'Code PIN')}</h2>
+        {onBack && (
+          <div className="auth-pin-nav" aria-label="Navigation">
+            <button
+              type="button"
+              className="auth-pin-nav-back"
+              disabled={busy}
+              onClick={handleBack}
+              title="Revenir au choix d’association (Échap)"
+            >
+              <span className="auth-pin-nav-arrow" aria-hidden>
+                ‹
+              </span>
+              <span className="auth-pin-nav-text">
+                <span className="auth-pin-nav-strong">Associations</span>
+                <span className="auth-pin-nav-sub">Changer de profil</span>
+              </span>
+            </button>
+            <p className="auth-pin-nav-hint">
+              <kbd className="auth-kbd-mini">Échap</kbd>
+              <span>pour annuler et revenir en arrière</span>
+            </p>
+          </div>
+        )}
+        <h2 className={`auth-title${onBack ? ' auth-title-after-nav' : ''}`}>
+          {title ?? (mode === 'setup' ? 'Créer un code PIN' : 'Code PIN')}
+        </h2>
         <p className="auth-sub">
           {mode === 'setup'
             ? 'Choisissez un code d’au moins 4 caractères pour protéger l’application.'

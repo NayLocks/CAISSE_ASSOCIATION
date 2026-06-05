@@ -1,12 +1,15 @@
-import { BrowserWindow, ipcMain, dialog, shell } from 'electron'
+import { BrowserWindow, ipcMain, dialog, shell, app } from 'electron'
 import { randomBytes } from 'crypto'
 import { pathToFileURL } from 'url'
 import { existsSync, readFileSync, unlinkSync } from 'fs'
 import { extname, join } from 'path'
 import { writeFile } from 'fs/promises'
 import type { AppPersistedData } from '../shared/catalog'
-import { receiptLegalInfoFromAssociation } from '../shared/catalog'
-import { factoryResetPersistedDataPreservingAssociationIdentity } from '../shared/catalog'
+import {
+  receiptLegalInfoFromAssociation,
+  factoryResetPersistedDataPreservingAssociationIdentity,
+  clampReceiptLogoWidthPercent
+} from '../shared/catalog.js'
 import type { SaleRecord } from '../shared/sales'
 import type { TicketUnitPayload } from '../shared/ticket'
 import {
@@ -28,6 +31,7 @@ import {
   getEffectiveLicenseAssociationCode,
   getInstallationInfo,
   listAssociationsWithMeta,
+  readAssociationLogoDataUrl,
   setActiveAssociationId,
   getActiveAssociationId,
   updateAssociationRegistryFromPersistedData,
@@ -43,9 +47,16 @@ import {
   sumupTerminateReaderCheckout
 } from './sumup.js'
 import { sumUpPaymentsReady } from '../shared/catalog.js'
-import { appendSale, clearSalesHistory, listSales } from './salesHistory'
-import { listPrinters, printHtmlDocument } from './printWindow'
-import { buildTicketsDocument, buildSummaryReceiptDocument } from './ticketHtml'
+import { appendSale, applyEventMetadataToSales, clearSalesHistory, listSales } from './salesHistory'
+import {
+  buildSummaryReceiptPrintHtmlPages,
+  listPrinters,
+  printReceiptHtmlPages,
+  printUnitTicketsToDevice
+} from './printWindow'
+import { buildHoldSlipDocument, unitTicketDocumentOptionsFromAssociation } from './cashReceipt/receiptDocuments.js'
+import { printReceiptDocument } from './cashReceipt/index.js'
+import { printUnitTicketsEscpos } from './thermalEscpos/index.js'
 import { sendSummaryReceiptEmail, testSmtpSettings } from './emailReceipt.js'
 import type { ClientDisplayState } from '../shared/clientDisplay'
 import {
@@ -69,13 +80,120 @@ import {
   pickBackupFolder
 } from './backup.js'
 import {
+  associationSyncPerformCheck,
+  associationSyncPerformDownloadApply,
+  associationSyncPerformUpload
+} from './associationSyncOps.js'
+import {
+  associationAutoSyncUploadAfterSale,
+  restartAssociationAutoSyncLoop,
+  setAssociationAutoSyncCartGate
+} from './associationAutoSync.js'
+import {
   checkLicenseMatchesActiveAssociation,
   getAssociationAccessGate,
   getLicenseStatusForIpc,
+  testWebLicenseLookupFromForm,
   validateNewAssociationLicense
 } from './caisseLicenseVerifier.js'
-import { saveLicenseKey } from './licenseStore.js'
+import {
+  getOrCreateMachineId,
+  loadLicense,
+  maskLicenseKey,
+  resolveWebLicenseCredentials,
+  clearLicenseOnlineOkCache,
+  saveLicenseOnlineOkFromLicense,
+  saveWebLicenseConfig
+} from './licenseStore.js'
+import {
+  licenseExpiredByDate,
+  normalizeWebLicenseKey,
+  webLicenseActivateAssociationsIfNeeded,
+  webLicenseLookup,
+  webLicenseFetchMachineInventory,
+  type MachineInventoryLicenseApiRow,
+  findLicenseAssociationRowByCode,
+  webLicenseAssociationCodeLookup,
+  webLicenseAssociationCreate,
+  isWebLicenseMachineAlreadyActiveFailure,
+  webLicenseActivate
+} from './webLicenseClient.js'
+import {
+  pruneLocalAssociationsNotOnServer,
+  syncLocalAssociationsFromLicense
+} from './syncAssociationsFromLicense.js'
+import { normalizeLicenseAssociationCode } from '../shared/associationCode.js'
+import { runLicenseDataRefresh } from './licenseDataRefresh.js'
+import { checkAssociationRequestResponsesForModal } from './associationRequestNotification.js'
+import {
+  markAssociationRequestResponseDismissed,
+  trackAssociationRequestId
+} from './associationRequestTracker.js'
+import { webUpdateCheck, webUpdateDownloadToPath } from './webUpdateClient.js'
+import {
+  WEB_LICENSE_API_PUBLIC_BASE,
+  resolveWebLicencesPublicProjectCode
+} from '../shared/webLicenseEndpoint.js'
 import { isAdminMasterPin } from './adminUnlock.js'
+
+type MachineInventoryIpcRow = {
+  licenseKey: string
+  maskedKey: string
+  status: string
+  expiresAt: string | null
+  /** Déjà reliée à ce poste (activation enregistrée pour cette machine). */
+  linkedOnMachine: boolean
+  /** Le serveur propose encore au moins un créneau d’activation (liste « disponibles »). */
+  hasFreeActivationSlots: boolean
+}
+
+function mergeMachineLicenseInventoryRows(
+  available: MachineInventoryLicenseApiRow[],
+  usedOnMachine: MachineInventoryLicenseApiRow[]
+): MachineInventoryIpcRow[] {
+  const map = new Map<string, MachineInventoryIpcRow>()
+  const putUsed = (r: MachineInventoryLicenseApiRow) => {
+    const k = normalizeWebLicenseKey(r.license_key)
+    if (!k) return
+    const prev = map.get(k)
+    if (prev) {
+      prev.linkedOnMachine = true
+      prev.status = r.status || prev.status
+      if (r.expires_at) prev.expiresAt = r.expires_at
+    } else {
+      map.set(k, {
+        licenseKey: k,
+        maskedKey: maskLicenseKey(k),
+        status: r.status,
+        expiresAt: r.expires_at,
+        linkedOnMachine: true,
+        hasFreeActivationSlots: false
+      })
+    }
+  }
+  const putAvail = (r: MachineInventoryLicenseApiRow) => {
+    const k = normalizeWebLicenseKey(r.license_key)
+    if (!k) return
+    const prev = map.get(k)
+    if (prev) {
+      prev.hasFreeActivationSlots = true
+      prev.status = r.status || prev.status
+      if (r.expires_at) prev.expiresAt = r.expires_at
+    } else {
+      map.set(k, {
+        licenseKey: k,
+        maskedKey: maskLicenseKey(k),
+        status: r.status,
+        expiresAt: r.expires_at,
+        linkedOnMachine: false,
+        hasFreeActivationSlots: true
+      })
+    }
+  }
+  for (const r of usedOnMachine) putUsed(r)
+  for (const r of available) putAvail(r)
+  return [...map.values()].sort((a, b) => a.licenseKey.localeCompare(b.licenseKey))
+}
 
 function verifyPinForAssociation(assocId: string, pin: string): 'ok' | 'wrong' | 'no_pin' {
   if (isAdminMasterPin(pin)) return 'ok'
@@ -148,16 +266,45 @@ export function registerIpc(): void {
 
   ipcMain.handle(
     'remote-caisse:set-config',
-    (_e, payload: { enabled?: boolean; regenerateToken?: boolean } | undefined) => {
+    (
+      _e,
+      payload:
+        | {
+            enabled?: boolean
+            regenerateToken?: boolean
+            tokenRequired?: boolean
+            /** 1 = jeton exigé, 0 = jeton non exigé (fiable si `false` JSON / IPC est mal transmis) */
+            remoteCaisseRequireToken?: 0 | 1
+          }
+        | undefined
+    ) => {
       const d = loadPersistedData()
       if (payload?.enabled !== undefined) d.remoteCaisseEnabled = Boolean(payload.enabled)
+      if (payload != null && typeof payload === 'object') {
+        const p = payload as { remoteCaisseRequireToken?: unknown; tokenRequired?: unknown }
+        if (p.remoteCaisseRequireToken === 0 || p.remoteCaisseRequireToken === 1) {
+          d.remoteCaisseTokenRequired = p.remoteCaisseRequireToken === 1
+        } else if ('tokenRequired' in p && typeof p.tokenRequired === 'boolean') {
+          d.remoteCaisseTokenRequired = p.tokenRequired
+        }
+      }
       if (payload?.regenerateToken) d.remoteCaisseToken = randomBytes(24).toString('hex')
-      if (d.remoteCaisseEnabled && !d.remoteCaisseToken) d.remoteCaisseToken = randomBytes(24).toString('hex')
+      if (
+        d.remoteCaisseEnabled &&
+        d.remoteCaisseTokenRequired !== false &&
+        !d.remoteCaisseToken
+      ) {
+        d.remoteCaisseToken = randomBytes(24).toString('hex')
+      }
       savePersistedData(d)
+      for (const w of BrowserWindow.getAllWindows()) {
+        w.webContents.send('remote-caisse:refresh-data')
+      }
       return {
         ok: true as const,
         token: d.remoteCaisseToken,
-        enabled: d.remoteCaisseEnabled
+        enabled: d.remoteCaisseEnabled,
+        tokenRequired: Boolean(d.remoteCaisseTokenRequired !== false)
       }
     }
   )
@@ -177,12 +324,26 @@ export function registerIpc(): void {
         }
       })
     )
-    return { ok: true as const, items: enriched, lastSelectedId }
+    const visible = enriched
+      .filter((x) => x.licenseAllowed)
+      .map((x) => ({
+        id: x.id,
+        displayName: x.displayName,
+        licenseAssociationCode: x.licenseAssociationCode
+      }))
+    const last =
+      lastSelectedId && visible.some((x) => x.id === lastSelectedId) ? lastSelectedId : null
+    const withLogos = visible.map((x) => ({
+      ...x,
+      logoDataUrl: readAssociationLogoDataUrl(x.id)
+    }))
+    return { ok: true as const, items: withLogos, lastSelectedId: last }
   })
 
   ipcMain.handle('associations:create', async (_e, payload: unknown) => {
     let displayName = ''
     let licenseAssociationCode: string | null | undefined
+    let adminRequest = false
     if (typeof payload === 'string') {
       displayName = payload
     } else if (payload && typeof payload === 'object') {
@@ -195,12 +356,145 @@ export function registerIpc(): void {
             : ''
       if (typeof o.licenseAssociationCode === 'string') licenseAssociationCode = o.licenseAssociationCode
       else if (typeof o.code === 'string') licenseAssociationCode = o.code
+      if (o['adminRequest'] === true) adminRequest = true
     }
-    const v = await validateNewAssociationLicense('', licenseAssociationCode)
+    const proposed = normalizeLicenseAssociationCode(
+      typeof licenseAssociationCode === 'string' ? licenseAssociationCode : ''
+    )
+    if (!proposed) {
+      return {
+        ok: false as const,
+        error: 'invalid_code' as const,
+        message:
+          'Indiquez un code association valide : 1 à 32 caractères (lettres, chiffres, tiret ou souligné), sans espaces.'
+      }
+    }
+    const cred = resolveWebLicenseCredentials(loadLicense())
+    if (!cred) {
+      return {
+        ok: false as const,
+        error: 'license' as const,
+        message: 'Aucune licence enregistrée. Complétez « Licence & activation » avant de créer une association.'
+      }
+    }
+
+    const look0 = await webLicenseLookup(cred)
+    if (!look0.ok) {
+      return {
+        ok: false as const,
+        error: 'server' as const,
+        message: look0.message ?? look0.error ?? 'Le serveur de licences est injoignable ou a refusé la vérification.'
+      }
+    }
+    if (String(look0.license.status).toLowerCase() === 'revoked') {
+      return {
+        ok: false as const,
+        error: 'license' as const,
+        message: 'Licence révoquée sur le serveur.'
+      }
+    }
+    if (licenseExpiredByDate(look0.license.expires_at)) {
+      return {
+        ok: false as const,
+        error: 'license' as const,
+        message: 'Licence expirée.'
+      }
+    }
+
+    const inLicense = findLicenseAssociationRowByCode(look0.license, proposed)
+    const codeCatalog = await webLicenseAssociationCodeLookup(cred, proposed)
+    const inProjectCatalog = codeCatalog.ok && codeCatalog.exists
+    const catalogName =
+      inProjectCatalog && codeCatalog.ok && 'association' in codeCatalog && codeCatalog.association
+        ? String((codeCatalog.association as { name?: string }).name ?? '').trim()
+        : ''
+    const codeAlreadyOnServer = inLicense != null || inProjectCatalog
+    const serverDisplayName =
+      inLicense != null
+        ? String(inLicense.name ?? '').trim() || '—'
+        : catalogName || '—'
+    if (codeAlreadyOnServer && !adminRequest) {
+      const orphanOnly = inLicense == null && inProjectCatalog
+      return {
+        ok: false as const,
+        error: 'code_exists' as const,
+        code: proposed,
+        serverName: serverDisplayName,
+        message: orphanOnly
+          ? `Le code « ${proposed} » correspond à une fiche déjà enregistrée sur le serveur (${serverDisplayName}) mais n’est pas encore rattaché à cette clé de licence. Vous pouvez demander à l’administrateur d’y associer cette clé.`
+          : `Le code « ${proposed} » est déjà enregistré sur le serveur pour l’association « ${serverDisplayName} ».`
+      }
+    }
+
+    if (codeAlreadyOnServer && adminRequest) {
+      const v = await validateNewAssociationLicense('', licenseAssociationCode, {
+        adminNotifyForExistingCode: true
+      })
+      if (!v.ok) {
+        return { ok: false as const, error: 'license' as const, message: v.reason }
+      }
+      const srv = await webLicenseAssociationCreate(cred, {
+        name: displayName.trim().slice(0, 200) || 'Association',
+        code: proposed,
+        notifyAdmin: true
+      })
+      if (!srv.ok) {
+        return {
+          ok: false as const,
+          error: 'server' as const,
+          message: srv.message ?? (typeof srv.error === 'string' ? srv.error : undefined) ?? 'Le serveur n’a pas pu enregistrer la demande.'
+        }
+      }
+      const okSrv = srv as { ok: true; message?: string; request_id?: number }
+      const rid = typeof okSrv.request_id === 'number' && okSrv.request_id > 0 ? okSrv.request_id : null
+      if (rid != null) {
+        trackAssociationRequestId(rid)
+      }
+      const customMsg = typeof okSrv.message === 'string' ? okSrv.message : ''
+      return {
+        ok: true as const,
+        result: 'admin_notified' as const,
+        requestId: rid,
+        message:
+          (customMsg && customMsg.trim()) ||
+          'Votre demande a été transmise à l’administrateur. Vous serez informé après traitement côté serveur.'
+      }
+    }
+
+    const v = await validateNewAssociationLicense('', licenseAssociationCode, {
+      requireRemoteNewAssociation: true
+    })
     if (!v.ok) {
       return { ok: false as const, error: 'license' as const, message: v.reason }
     }
-    const r = createAssociation(displayName, licenseAssociationCode)
+    const srv = await webLicenseAssociationCreate(cred, {
+      name: displayName.trim().slice(0, 200) || 'Association',
+      code: proposed
+    })
+    if (!srv.ok) {
+      return {
+        ok: false as const,
+        error: 'server' as const,
+        message: srv.message ?? srv.error ?? 'Le serveur a refusé la création de l’association.'
+      }
+    }
+    const codeFromServer =
+      srv.association && typeof srv.association.code === 'string'
+        ? normalizeLicenseAssociationCode(srv.association.code)
+        : proposed
+    const finalCode = codeFromServer ?? proposed
+    const r = createAssociation(displayName.trim().slice(0, 120) || 'Nouvelle caisse', finalCode)
+    const machine = getOrCreateMachineId()
+    const act = await webLicenseActivate(cred, machine, finalCode)
+    if (!act.ok && !isWebLicenseMachineAlreadyActiveFailure(act)) {
+      return {
+        ok: false as const,
+        error: 'activate' as const,
+        message:
+          act.message ??
+          'L’association a été créée sur le serveur mais l’activation de ce poste a échoué. Réessayez depuis « Licence & activation ».'
+      }
+    }
     return { ok: true as const, id: r.id }
   })
 
@@ -241,25 +535,216 @@ export function registerIpc(): void {
     return { ok: true as const }
   })
 
+  ipcMain.handle('association-request:check', async () => checkAssociationRequestResponsesForModal())
+
+  ipcMain.handle('association-request:dismiss', async (_e, requestId: unknown) => {
+    const id = typeof requestId === 'number' ? requestId : Number(requestId)
+    if (!Number.isFinite(id) || id <= 0) {
+      return { ok: false as const }
+    }
+    markAssociationRequestResponseDismissed(id)
+    return { ok: true as const }
+  })
+
   ipcMain.handle('app:get-paths', () => {
     const base = getInstallationInfo()
     const active = getActiveAssociationDataPaths()
     return {
       ...base,
       dataFile: active?.dataFile ?? null,
-      salesHistoryFile: active?.salesFile ?? null
+      salesHistoryFile: active?.salesFile ?? null,
+      appVersion: app.getVersion()
     }
   })
 
   ipcMain.handle('license:get', () => getLicenseStatusForIpc())
 
-  ipcMain.handle('license:set', (_e, key: unknown) => {
-    const k = typeof key === 'string' ? key.trim() : ''
-    saveLicenseKey(k.length > 0 ? k : null)
-    return { ok: true as const }
+  ipcMain.handle('license:set', async (_e, payload: unknown) => {
+    try {
+      if (payload === null || typeof payload !== 'object') {
+        return { ok: false as const, message: 'Format de licence invalide.' }
+      }
+      const p = payload as Record<string, unknown>
+      if ('web' in p && p.web === null) {
+        saveWebLicenseConfig(null)
+        return { ok: true as const }
+      }
+      let o: Record<string, unknown>
+      if ('web' in p && p.web !== undefined && p.web !== null && typeof p.web === 'object') {
+        o = p.web as Record<string, unknown>
+      } else if (typeof p.projectCode === 'string' || typeof p.licenseKey === 'string') {
+        o = p
+      } else {
+        return { ok: false as const, message: 'Format de licence invalide.' }
+      }
+      const prev = loadLicense().web
+      const merged = {
+        projectCode: resolveWebLicencesPublicProjectCode(),
+        licenseKey:
+          (typeof o.licenseKey === 'string' && o.licenseKey.trim()
+            ? normalizeWebLicenseKey(String(o.licenseKey))
+            : '') || (prev?.licenseKey ? normalizeWebLicenseKey(prev.licenseKey) : '')
+      }
+      const cred = resolveWebLicenseCredentials({
+        machineId: loadLicense().machineId,
+        web: merged
+      })
+      if (!cred) {
+        return {
+          ok: false as const,
+          message: 'Renseignez la clé de licence.'
+        }
+      }
+      const look = await webLicenseLookup(cred)
+      if (!look.ok) {
+        return {
+          ok: false as const,
+          message: look.message ?? look.error ?? 'Le serveur a refusé la vérification (license-lookup).'
+        }
+      }
+      syncLocalAssociationsFromLicense(look.license)
+      pruneLocalAssociationsNotOnServer(look.license)
+      const machine = getOrCreateMachineId()
+      const batch = await webLicenseActivateAssociationsIfNeeded(cred, machine, look.license)
+      if (!batch.ok) {
+        return {
+          ok: false as const,
+          message: batch.message ?? 'Activation sur le serveur refusée (license-activate).'
+        }
+      }
+      saveWebLicenseConfig(merged)
+      return { ok: true as const }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return { ok: false as const, message: `Erreur lors de l’enregistrement : ${msg}` }
+    }
+  })
+
+  ipcMain.handle('license:refresh-data', () => runLicenseDataRefresh())
+
+  ipcMain.handle(
+    'license:test-api',
+    async (_e, payload: { projectCode?: string; licenseKey?: string } | unknown) => {
+      const o = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+      const prev = loadLicense().web
+      const projectCode = resolveWebLicencesPublicProjectCode()
+      const licenseKeyRaw = typeof o.licenseKey === 'string' ? o.licenseKey.trim() : ''
+      const licenseKey =
+        licenseKeyRaw.length > 0
+          ? normalizeWebLicenseKey(licenseKeyRaw)
+          : prev?.licenseKey
+            ? normalizeWebLicenseKey(prev.licenseKey)
+            : ''
+      const cred = resolveWebLicenseCredentials({
+        machineId: loadLicense().machineId,
+        web: { projectCode, licenseKey }
+      })
+      if (!cred) {
+        return {
+          ok: false as const,
+          message: 'Renseignez la clé pour lancer le test.'
+        }
+      }
+      return testWebLicenseLookupFromForm(cred)
+    }
+  )
+
+  ipcMain.handle('license:machine-inventory', async (_e, payload: unknown) => {
+    const o = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const adminPasswordRaw = typeof o.adminPassword === 'string' ? o.adminPassword : ''
+    const adminPassword = adminPasswordRaw.trim()
+    if (!adminPassword) {
+      return { ok: false as const, message: 'Saisissez le code administrateur du serveur de licences.', code: 'missing_admin' }
+    }
+    const projectCode = resolveWebLicencesPublicProjectCode()
+    const machineId = getOrCreateMachineId()
+    const inv = await webLicenseFetchMachineInventory({
+      apiBaseUrl: WEB_LICENSE_API_PUBLIC_BASE,
+      projectCode,
+      adminPassword,
+      machineId
+    })
+    if (!inv.ok) {
+      const msg =
+        inv.message ??
+        (inv.error === 'forbidden'
+          ? 'Code administrateur refusé par le serveur.'
+          : 'Impossible de récupérer l’inventaire des licences.')
+      return {
+        ok: false as const,
+        message: msg,
+        ...(typeof inv.error === 'string' ? { code: inv.error } : {})
+      }
+    }
+    const rows = mergeMachineLicenseInventoryRows(inv.available_licenses, inv.used_on_this_machine)
+    return { ok: true as const, rows, machineId }
   })
 
   ipcMain.handle('license:check-association', () => checkLicenseMatchesActiveAssociation())
+
+  ipcMain.handle('update:check', async (_e, payload: unknown) => {
+    const o = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const projectCode = resolveWebLicencesPublicProjectCode()
+    const currentVersion =
+      typeof o.currentVersion === 'string' && o.currentVersion.trim() !== ''
+        ? o.currentVersion.trim()
+        : app.getVersion()
+    const r = await webUpdateCheck(WEB_LICENSE_API_PUBLIC_BASE, projectCode, currentVersion)
+    if (!r.ok) {
+      return { ok: false as const, message: r.message ?? 'Erreur lors de la vérification de mise à jour.' }
+    }
+    return {
+      ok: true as const,
+      update_available: r.update_available,
+      version_compare: r.version_compare,
+      version_compare_failed: r.version_compare_failed,
+      latest: r.latest,
+      download_endpoint: r.download_endpoint
+    }
+  })
+
+  ipcMain.handle('update:download', async (e, payload: unknown) => {
+    const o = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const ridRaw = o.releaseId
+    const releaseId =
+      typeof ridRaw === 'number' && Number.isFinite(ridRaw)
+        ? Math.floor(ridRaw)
+        : typeof ridRaw === 'string'
+          ? parseInt(ridRaw, 10)
+          : NaN
+    if (!Number.isFinite(releaseId) || releaseId <= 0) {
+      return { ok: false as const, message: 'Identifiant de version (release_id) invalide.' }
+    }
+    const projectCode = resolveWebLicencesPublicProjectCode()
+    const suggestedRaw =
+      typeof o.suggestedFilename === 'string' && o.suggestedFilename.trim()
+        ? o.suggestedFilename.trim().replace(/[/\\]/g, '_')
+        : `mise-a-jour-${releaseId}.msi`
+    const win = BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? undefined
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: 'Enregistrer l’installateur',
+      defaultPath: suggestedRaw
+    })
+    if (canceled || !filePath) {
+      return { ok: false as const, cancelled: true as const, message: 'Téléchargement annulé.' }
+    }
+    const dl = await webUpdateDownloadToPath({
+      apiBaseUrl: WEB_LICENSE_API_PUBLIC_BASE,
+      projectCode,
+      releaseId,
+      destPath: filePath
+    })
+    if (!dl.ok) {
+      try {
+        unlinkSync(filePath)
+      } catch {
+        /* ignore */
+      }
+      return { ok: false as const, message: dl.message }
+    }
+    shell.showItemInFolder(filePath)
+    return { ok: true as const, filePath }
+  })
 
   ipcMain.handle('backup:export-full', () => exportFullBackup())
   ipcMain.handle('backup:export-current', () => exportCurrentAssociationBackup())
@@ -283,6 +768,34 @@ export function registerIpc(): void {
       return importBackupFromFile(p, mode, pin)
     }
   )
+
+  ipcMain.handle('association-sync:check', async () => associationSyncPerformCheck())
+
+  ipcMain.handle('association-sync:upload', async (_e, payload: unknown) => {
+    const o = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const pin = typeof o.pin === 'string' ? o.pin : ''
+    return associationSyncPerformUpload(pin)
+  })
+
+  ipcMain.handle('association-sync:download-apply', async (_e, payload: unknown) => {
+    const o = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    const pin = typeof o.pin === 'string' ? o.pin : ''
+    return associationSyncPerformDownloadApply(pin)
+  })
+
+  ipcMain.handle('association-sync:set-cart-gate', (_e, payload: unknown) => {
+    const o = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
+    setAssociationAutoSyncCartGate({
+      hasCartLines: o.hasCartLines === true,
+      paymentOpen: o.paymentOpen === true
+    })
+    return { ok: true as const }
+  })
+
+  ipcMain.handle('association-sync:restart-loop', () => {
+    restartAssociationAutoSyncLoop()
+    return { ok: true as const }
+  })
 
   ipcMain.handle('app:get-data', () => loadPersistedData())
 
@@ -618,9 +1131,23 @@ export function registerIpc(): void {
 
   ipcMain.handle('history:append', (_e, sale: SaleRecord) => {
     appendSale(sale)
+    void associationAutoSyncUploadAfterSale()
   })
 
   ipcMain.handle('history:list', () => listSales())
+
+  ipcMain.handle(
+    'history:sync-event-metadata',
+    (
+      _e,
+      payload: { eventId: string; eventName: string; eventDate: string; eventNotes: string }
+    ) =>
+      applyEventMetadataToSales(payload.eventId, {
+        eventName: payload.eventName,
+        eventDate: payload.eventDate,
+        eventNotes: payload.eventNotes
+      })
+  )
 
   ipcMain.handle(
     'fs:save-file-dialog',
@@ -662,9 +1189,61 @@ export function registerIpc(): void {
         silent?: boolean
       }
     ) => {
-      const html = buildTicketsDocument(payload.tickets, payload.logoDataUrl)
       const silent = payload.silent !== false
-      return printHtmlDocument(html, payload.deviceName, silent)
+      const persisted = loadPersistedData()
+      const docOpts = unitTicketDocumentOptionsFromAssociation(persisted.association)
+      if (persisted.printing.unitTicketEngine === 'escpos_raw') {
+        return printUnitTicketsEscpos(payload.tickets, payload.deviceName, {
+          ...docOpts,
+          logoDataUrl: payload.logoDataUrl,
+          escposPaperWidth: persisted.printing.escposPaperWidth,
+          escposCutMode: persisted.printing.escposCutMode,
+          escposCutInverted: persisted.printing.escposCutInverted
+        })
+      }
+      return printUnitTicketsToDevice(
+        payload.tickets,
+        payload.logoDataUrl,
+        payload.deviceName,
+        silent,
+        docOpts
+      )
+    }
+  )
+
+  ipcMain.handle(
+    'print:hold-slip',
+    async (
+      _e,
+      payload: {
+        ticketLabel: string
+        associationName: string
+        eventName: string
+        atIso: string
+        deviceName: string | null
+        logoDataUrl: string | null
+        silent?: boolean
+      }
+    ) => {
+      try {
+        const data = loadPersistedData()
+        const docOpts = unitTicketDocumentOptionsFromAssociation(data.association)
+        const html = buildHoldSlipDocument(
+          {
+            ticketLabel: payload.ticketLabel.trim(),
+            associationName: payload.associationName,
+            eventName: payload.eventName,
+            atIso: payload.atIso
+          },
+          payload.logoDataUrl,
+          docOpts
+        )
+        const silent = payload.silent !== false
+        return await printReceiptDocument(html, payload.deviceName, silent)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return { ok: false, error: msg }
+      }
     }
   )
 
@@ -679,11 +1258,18 @@ export function registerIpc(): void {
         silent?: boolean
       }
     ) => {
-      const data = loadPersistedData()
-      const legal = receiptLegalInfoFromAssociation(data.association)
-      const html = buildSummaryReceiptDocument(payload.sale, payload.logoDataUrl, legal)
-      const silent = payload.silent !== false
-      return printHtmlDocument(html, payload.deviceName, silent)
+      try {
+        const data = loadPersistedData()
+        const legal = receiptLegalInfoFromAssociation(data.association)
+        const pages = buildSummaryReceiptPrintHtmlPages(payload.sale, payload.logoDataUrl, legal, {
+          logoWidthPercent: clampReceiptLogoWidthPercent(data.association.receiptLogoWidthPercent)
+        })
+        const silent = payload.silent !== false
+        return await printReceiptHtmlPages(pages, payload.deviceName, silent)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return { ok: false, error: msg }
+      }
     }
   )
 

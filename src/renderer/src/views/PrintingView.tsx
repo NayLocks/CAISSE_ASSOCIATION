@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { TicketUnitPayload } from '@shared/ticket'
 import type { SaleRecord } from '@shared/sales'
+import type { EscposPaperCutMode, EscposPaperWidth, ThermalUnitTicketEngine } from '@shared/catalog'
 import { useAppState } from '@renderer/state/AppStateContext'
 
 type PrinterRow = { name: string; displayName: string }
@@ -48,6 +49,46 @@ export default function PrintingView(): JSX.Element {
     [setData]
   )
 
+  const setUnitTicketEngine = useCallback(
+    (unitTicketEngine: ThermalUnitTicketEngine) => {
+      setData((prev) => ({
+        ...prev,
+        printing: { ...prev.printing, unitTicketEngine }
+      }))
+    },
+    [setData]
+  )
+
+  const setEscposCutMode = useCallback(
+    (escposCutMode: EscposPaperCutMode) => {
+      setData((prev) => ({
+        ...prev,
+        printing: { ...prev.printing, escposCutMode }
+      }))
+    },
+    [setData]
+  )
+
+  const setEscposPaperWidth = useCallback(
+    (escposPaperWidth: EscposPaperWidth) => {
+      setData((prev) => ({
+        ...prev,
+        printing: { ...prev.printing, escposPaperWidth }
+      }))
+    },
+    [setData]
+  )
+
+  const setEscposCutInverted = useCallback(
+    (escposCutInverted: boolean) => {
+      setData((prev) => ({
+        ...prev,
+        printing: { ...prev.printing, escposCutInverted }
+      }))
+    },
+    [setData]
+  )
+
   const testPrint = useCallback(async () => {
     setPrintMsg(null)
     const dn = data.printing.deviceName
@@ -82,11 +123,10 @@ export default function PrintingView(): JSX.Element {
         <h2 className="page-title">Impression tickets</h2>
         <p className="page-desc">
           Après chaque vente validée, un <strong>ticket par unité</strong> peut être imprimé (ex. 3× Coca → 3
-          tickets « 1 × Coca ») avec logo, date et événement. Format largeur ticket thermique&nbsp;: 70&nbsp;mm.
-          Si l’impression échoue avec un pilote « SERVICE INFO » ou un redirecteur, décochez l’impression
-          silencieuse pour utiliser la boîte Windows. L’<strong>affichage client</strong> (écran public) est dans{' '}
-          <strong>Écran client</strong>. L’envoi du récapitulatif par e-mail (PDF) se configure dans{' '}
-          <strong>E-mail tickets</strong>.
+          tickets « 1 × Coca ») avec logo, date et événement. Si l’impression échoue avec un pilote « SERVICE INFO » ou un
+          redirecteur, décochez l’impression silencieuse pour utiliser la boîte Windows. L’
+          <strong>affichage client</strong> (écran public) est dans <strong>Écran client</strong>. L’envoi du récap par
+          e-mail (PDF) se configure dans <strong>E-mail tickets</strong>.
         </p>
 
         {loadErr && <p className="banner-warn">{loadErr}</p>}
@@ -123,8 +163,108 @@ export default function PrintingView(): JSX.Element {
             />
             <span>Impression silencieuse (sans boîte de dialogue Windows)</span>
           </label>
+          <fieldset className="field" style={{ marginTop: '1rem', border: '1px solid var(--border)', borderRadius: 8, padding: '0.75rem 1rem' }}>
+            <legend style={{ padding: '0 0.35rem' }}>Tickets unitaires (vitesse)</legend>
+            <p className="sub" style={{ margin: '0 0 0.65rem' }}>
+              Le <strong>récapitulatif caisse</strong> et l’e-mail PDF restent en mode navigateur (HTML).
+            </p>
+            <label className="check-label block-check">
+              <input
+                type="radio"
+                name="unitTicketEngine"
+                checked={p.unitTicketEngine === 'html_chromium'}
+                onChange={() => setUnitTicketEngine('html_chromium')}
+              />
+              <span>
+                <strong>Navigateur (HTML)</strong> — logo, mise en page actuelle ; un peu plus lent sur les
+                séries.
+              </span>
+            </label>
+            <label className="check-label block-check">
+              <input
+                type="radio"
+                name="unitTicketEngine"
+                checked={p.unitTicketEngine === 'escpos_raw'}
+                onChange={() => setUnitTicketEngine('escpos_raw')}
+              />
+              <span>
+                <strong>ESC/POS brut (Windows)</strong> — commandes ESC/POS (texte + logo en points),
+                ordre et mise en page rapprochés du ticket HTML ; plus rapide en série qu’une fenêtre
+                navigateur. Choisissez la largeur du rouleau (58 / 80 mm) pour le retour à la ligne.
+              </span>
+            </label>
+            {p.unitTicketEngine === 'escpos_raw' && (
+              <div style={{ marginLeft: '1.35rem', marginTop: '0.5rem', marginBottom: '0.15rem' }}>
+                <p className="sub" style={{ margin: '0 0 0.4rem' }}>
+                  Largeur du rouleau (texte + logo)
+                </p>
+                <label className="check-label block-check">
+                  <input
+                    type="radio"
+                    name="escposPaperWidth"
+                    checked={(p.escposPaperWidth ?? '80mm') === '80mm'}
+                    onChange={() => setEscposPaperWidth('80mm')}
+                  />
+                  <span>
+                    <strong>80 mm</strong> — environ 48 caractères par ligne (réglage par défaut).
+                  </span>
+                </label>
+                <label className="check-label block-check">
+                  <input
+                    type="radio"
+                    name="escposPaperWidth"
+                    checked={p.escposPaperWidth === '58mm'}
+                    onChange={() => setEscposPaperWidth('58mm')}
+                  />
+                  <span>
+                    <strong>58 mm</strong> — environ 32 caractères par ligne si le ticket est plus étroit.
+                  </span>
+                </label>
+                <p className="sub" style={{ margin: '0.75rem 0 0.4rem' }}>
+                  Coupe papier (fin de chaque ticket : avance jusqu’à la lame puis coupe, commandes{' '}
+                  <code>GS V 65 / 66</code> — plus fiable qu’un simple <code>GS V 0 / 1</code> sur la plupart des
+                  Epson et compatibles).
+                </p>
+                <label className="check-label block-check">
+                  <input
+                    type="radio"
+                    name="escposCutMode"
+                    checked={(p.escposCutMode ?? 'partial') === 'partial'}
+                    onChange={() => setEscposCutMode('partial')}
+                  />
+                  <span>
+                    <strong>Partielle</strong> — souvent une languette ; le ticket reste accroché au rouleau
+                    jusqu’à tirer.
+                  </span>
+                </label>
+                <label className="check-label block-check">
+                  <input
+                    type="radio"
+                    name="escposCutMode"
+                    checked={p.escposCutMode === 'full'}
+                    onChange={() => setEscposCutMode('full')}
+                  />
+                  <span>
+                    <strong>Totale</strong> — ticket entièrement séparé du rouleau.
+                  </span>
+                </label>
+                <label className="check-label block-check">
+                  <input
+                    type="checkbox"
+                    checked={p.escposCutInverted === true}
+                    onChange={(e) => setEscposCutInverted(e.target.checked)}
+                  />
+                  <span>
+                    <strong>Codes coupe inversés</strong> — à activer si la coupe <em>totale</em> laisse encore une
+                    languette : certains clones utilisent <code>GS V 1</code> pour la totale et <code>GS V 0</code>{' '}
+                    pour la partielle (inverse Epson).
+                  </span>
+                </label>
+              </div>
+            )}
+          </fieldset>
           <div className="print-actions">
-            <button type="button" className="btn btn-secondary" onClick={() => void testPrint()}>
+            <button type="button" className="btn btn-primary" onClick={() => void testPrint()}>
               Imprimer un ticket test
             </button>
           </div>

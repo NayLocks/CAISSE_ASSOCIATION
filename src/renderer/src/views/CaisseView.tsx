@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { type ProductConfig, sumUpPaymentsReady } from '@shared/catalog'
+import { useFocusTrap } from '@renderer/hooks/useFocusTrap'
+import {
+  type ProductConfig,
+  sumUpPaymentsReady,
+  formatDiscountMotifReason,
+  type DiscountMotifPreset,
+  DEFAULT_DISCOUNT_MOTIFS
+} from '@shared/catalog'
 import type { RemoteCaisseMirror } from '@shared/remoteCaisseMirror'
 import type {
   ClientDisplayState,
@@ -8,7 +15,7 @@ import type {
 } from '@shared/clientDisplay'
 import type { SaleLineSnapshot, SalePayment, SaleRecord } from '@shared/sales'
 import type { TicketUnitPayload } from '@shared/ticket'
-import { getStockMap } from '@shared/inventory'
+import { getStockMap, isLowStock, listLowStockProducts } from '@shared/inventory'
 import {
   finalUnitCents,
   lineBaseUnitCents,
@@ -18,9 +25,28 @@ import {
 import { buildClientLineDetailLines } from '@shared/clientDisplayLineDetail'
 import { useAppState } from '@renderer/state/AppStateContext'
 import { useShellNav } from '@renderer/state/ShellNavContext'
+import { useToast } from '@renderer/state/ToastContext'
 import { formatMoney, parseEurosToCents } from '@renderer/utils/money'
+import {
+  heldCartsStorageKey,
+  readHeldCartState,
+  writeHeldCartState,
+  type StoredHeldCart
+} from '@renderer/utils/heldCartsStorage'
+import {
+  CHOOSEABLE_SHORTCUT_TOKENS,
+  eventMatchesShortcut,
+  KEYBOARD_SHORTCUTS_CHANGED,
+  readKeyboardShortcuts,
+  SHORTCUT_IDS,
+  SHORTCUT_LABELS,
+  validateUniqueShortcuts,
+  writeKeyboardShortcuts
+} from '@renderer/utils/keyboardShortcutsStorage'
+import { formatOrderDigits } from '@shared/orderDigits'
 import { formatOrderDisplay } from '@renderer/utils/order'
 import PaymentModal from '@renderer/components/PaymentModal'
+import EmptyState from '@renderer/components/EmptyState'
 
 function useClock(): Date {
   const [now, setNow] = useState(() => new Date())
@@ -45,12 +71,9 @@ type CartLineRow = {
   discountReason: string
 }
 
-const BENEVOLE_MOTIF_MAX = 200
+const MAX_HELD_CARTS = 12
 
-function formatBenevoleMotif(prenom: string): string {
-  const motif = `Bénévole — ${prenom.trim()}`
-  return motif.length > BENEVOLE_MOTIF_MAX ? motif.slice(0, BENEVOLE_MOTIF_MAX) : motif
-}
+type HeldCartEntry = StoredHeldCart
 
 function paymentLabel(p: SalePayment, kind: 'sale' | 'refund' = 'sale'): string {
   if (kind === 'refund') {
@@ -66,7 +89,12 @@ function paymentLabel(p: SalePayment, kind: 'sale' | 'refund' = 'sale'): string 
 export default function CaisseView(): JSX.Element {
   const { data, setData, logoHref } = useAppState()
   const { pendingRefundSale, acknowledgePendingRefund } = useShellNav()
+  const { showToast } = useToast()
   const now = useClock()
+  const discountMotifPresets = useMemo(
+    () => (data.discountMotifs?.length ? data.discountMotifs : DEFAULT_DISCOUNT_MOTIFS),
+    [data.discountMotifs]
+  )
   const [category, setCategory] = useState<string | 'all'>('all')
   const [quantities, setQuantities] = useState<Record<string, number>>({})
   const [showPayment, setShowPayment] = useState(false)
@@ -88,10 +116,12 @@ export default function CaisseView(): JSX.Element {
     | { scope: 'cart'; draftPct: string; draftReason: string }
     | null
   >(null)
-  /** Modale prénom bénévole (au-dessus de la modale Remise). */
-  const [benevoleModalOpen, setBenevoleModalOpen] = useState(false)
-  const [benevolePrenom, setBenevolePrenom] = useState('')
-  const [benevoleError, setBenevoleError] = useState<string | null>(null)
+  /** Modale commentaire pour un motif « avec commentaire obligatoire ». */
+  const [motifCommentPreset, setMotifCommentPreset] = useState<DiscountMotifPreset | null>(null)
+  const [motifCommentDraft, setMotifCommentDraft] = useState('')
+  const [motifCommentError, setMotifCommentError] = useState<string | null>(null)
+  /** Modale secondaire : liste des motifs (après « Oui »). */
+  const [motifPickerOpen, setMotifPickerOpen] = useState(false)
   const [refundMaxByProduct, setRefundMaxByProduct] = useState<Record<string, number> | null>(null)
   const [refundSourceMeta, setRefundSourceMeta] = useState<{
     saleId: string
@@ -103,8 +133,36 @@ export default function CaisseView(): JSX.Element {
   const [productImg, setProductImg] = useState<Record<string, string>>({})
   const [paymentDetail, setPaymentDetail] = useState<ClientPaymentDetail | null>(null)
   const [tabletPayTick, setTabletPayTick] = useState(0)
+  const [heldCarts, setHeldCarts] = useState<HeldCartEntry[]>([])
+  const [nextHoldTicketNum, setNextHoldTicketNum] = useState(1)
+  const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [productSearch, setProductSearch] = useState('')
+  const productSearchInputRef = useRef<HTMLInputElement>(null)
+  const shortcutsOverlayRef = useRef<HTMLDivElement>(null)
+  const remiseOverlayRef = useRef<HTMLDivElement>(null)
+  const motifPickerOverlayRef = useRef<HTMLDivElement>(null)
+  const benevoleOverlayRef = useRef<HTMLDivElement>(null)
+
+  const [kbdShortcuts, setKbdShortcuts] = useState(() => readKeyboardShortcuts())
+  const [shortcutEditDraft, setShortcutEditDraft] = useState(() => readKeyboardShortcuts())
+
+  useEffect(() => {
+    const onUp = (): void => setKbdShortcuts(readKeyboardShortcuts())
+    window.addEventListener(KEYBOARD_SHORTCUTS_CHANGED, onUp)
+    return () => window.removeEventListener(KEYBOARD_SHORTCUTS_CHANGED, onUp)
+  }, [])
+
+  useEffect(() => {
+    if (shortcutsOpen) setShortcutEditDraft(readKeyboardShortcuts())
+  }, [shortcutsOpen])
+
+  useFocusTrap(shortcutsOverlayRef, shortcutsOpen)
+  useFocusTrap(remiseOverlayRef, Boolean(remiseModal))
+  useFocusTrap(motifPickerOverlayRef, motifPickerOpen && Boolean(remiseModal))
+  useFocusTrap(benevoleOverlayRef, Boolean(motifCommentPreset && remiseModal))
 
   const applyingRemoteCart = useRef(false)
+  const skipHeldPersist = useRef(true)
 
   const onPaymentDisplayUpdate = useCallback((d: ClientPaymentDetail | null) => {
     setPaymentDetail(d)
@@ -201,9 +259,10 @@ export default function CaisseView(): JSX.Element {
 
   useEffect(() => {
     if (!remiseModal) {
-      setBenevoleModalOpen(false)
-      setBenevolePrenom('')
-      setBenevoleError(null)
+      setMotifCommentPreset(null)
+      setMotifCommentDraft('')
+      setMotifCommentError(null)
+      setMotifPickerOpen(false)
     }
   }, [remiseModal])
 
@@ -288,6 +347,34 @@ export default function CaisseView(): JSX.Element {
   )
   const canSell = Boolean(selectedEvent && sessionInfo && !eventClosed)
 
+  const heldStorageKey = useMemo(
+    () => heldCartsStorageKey(data.association, data.selectedEventId),
+    [
+      data.association.licenseAssociationCode,
+      data.association.numero,
+      data.association.name,
+      data.selectedEventId
+    ]
+  )
+
+  useEffect(() => {
+    skipHeldPersist.current = true
+    const st = readHeldCartState(heldStorageKey)
+    setHeldCarts(st.entries)
+    setNextHoldTicketNum(st.nextHoldTicketNum)
+  }, [heldStorageKey])
+
+  useEffect(() => {
+    if (skipHeldPersist.current) {
+      skipHeldPersist.current = false
+      return
+    }
+    const t = window.setTimeout(() => {
+      writeHeldCartState(heldStorageKey, { entries: heldCarts, nextHoldTicketNum })
+    }, 350)
+    return () => window.clearTimeout(t)
+  }, [heldStorageKey, heldCarts, nextHoldTicketNum])
+
   const [floatDraft, setFloatDraft] = useState('0')
 
   useEffect(() => {
@@ -317,9 +404,11 @@ export default function CaisseView(): JSX.Element {
   const categoryTabs = data.categories
 
   const filtered = useMemo(() => {
-    if (category === 'all') return products
-    return products.filter((p) => p.category === category)
-  }, [category, products])
+    const base = category === 'all' ? products : products.filter((p) => p.category === category)
+    const q = productSearch.trim().toLowerCase()
+    if (!q) return base
+    return base.filter((p) => p.name.toLowerCase().includes(q))
+  }, [category, products, productSearch])
 
   const lines = useMemo((): CartLineRow[] => {
     const out: CartLineRow[] = []
@@ -347,6 +436,13 @@ export default function CaisseView(): JSX.Element {
     [subtotalCents, cartDiscountPct]
   )
 
+  useEffect(() => {
+    void window.caisse.associationSyncSetCartGate({
+      hasCartLines: lines.length > 0,
+      paymentOpen: showPayment
+    })
+  }, [lines.length, showPayment])
+
   const applyRefundFromSale = useCallback(
     (sale: SaleRecord) => {
       setRefundMode(true)
@@ -373,11 +469,13 @@ export default function CaisseView(): JSX.Element {
         qtyMap[line.productId] = line.qty
       }
       if (Object.keys(qtyMap).length === 0) {
-        window.alert(
-          missing > 0
-            ? 'Aucun article de cette vente ne correspond au catalogue actuel. Vérifiez les articles.'
-            : 'Vente vide.'
-        )
+        showToast({
+          variant: 'error',
+          message:
+            missing > 0
+              ? 'Aucun article de cette vente ne correspond au catalogue actuel. Vérifiez les articles.'
+              : 'Vente vide.'
+        })
         return
       }
       setRefundMaxByProduct(caps)
@@ -395,27 +493,44 @@ export default function CaisseView(): JSX.Element {
         orderNumber: sale.orderNumber
       })
       if (missing > 0) {
-        window.alert(
-          `${missing} ligne(s) ignorée(s) : article absent du catalogue ou identifiant modifié. Les autres lignes sont chargées.`
-        )
+        showToast({
+          variant: 'error',
+          message: `${missing} ligne(s) ignorée(s) : article absent du catalogue ou identifiant modifié. Les autres lignes sont chargées.`
+        })
       }
     },
-    [products, setData]
+    [products, setData, showToast]
   )
 
   useEffect(() => {
     if (!pendingRefundSale) return
     if (pendingRefundSale.kind === 'refund') {
       acknowledgePendingRefund()
-      window.alert('Choisissez une vente (et non un remboursement déjà enregistré).')
+      showToast({
+        message: 'Choisissez une vente (et non un remboursement déjà enregistré).'
+      })
       return
     }
     const s = pendingRefundSale
     acknowledgePendingRefund()
     applyRefundFromSale(s)
-  }, [pendingRefundSale, acknowledgePendingRefund, applyRefundFromSale])
+  }, [pendingRefundSale, acknowledgePendingRefund, applyRefundFromSale, showToast])
 
   const toggleRefundMode = useCallback(() => {
+    if (!refundMode) {
+      const hasItems = Object.values(quantities).some((q) => (q ?? 0) > 0)
+      if (hasItems) {
+        setRefundMode(true)
+        setRefundMaxByProduct(null)
+        setRefundSourceMeta(null)
+        setRemiseModal(null)
+        setMotifCommentPreset(null)
+        setMotifCommentDraft('')
+        setMotifCommentError(null)
+        setMotifPickerOpen(false)
+        return
+      }
+    }
     setRefundMode((v) => !v)
     setQuantities({})
     setPriceOverrides({})
@@ -426,7 +541,11 @@ export default function CaisseView(): JSX.Element {
     setRefundMaxByProduct(null)
     setRefundSourceMeta(null)
     setRemiseModal(null)
-  }, [])
+    setMotifCommentPreset(null)
+    setMotifCommentDraft('')
+    setMotifCommentError(null)
+    setMotifPickerOpen(false)
+  }, [refundMode, quantities])
 
   const add = useCallback(
     (p: ProductConfig) => {
@@ -492,6 +611,159 @@ export default function CaisseView(): JSX.Element {
     setRemiseModal(null)
   }, [])
 
+  const applyMirrorToCart = useCallback((m: RemoteCaisseMirror) => {
+    setQuantities({ ...m.quantities })
+    setRefundMode(m.refundMode)
+    setRefundMaxByProduct(m.refundMaxByProduct ? { ...m.refundMaxByProduct } : null)
+    setRefundSourceMeta(m.refundSourceMeta ? { ...m.refundSourceMeta } : null)
+    setPriceOverrides({ ...m.priceOverrides })
+    setDiscountPctByProduct({ ...(m.lineDiscountPct ?? {}) })
+    setDiscountReasonByProduct({ ...(m.lineDiscountReason ?? {}) })
+    const cp =
+      typeof m.cartDiscountPct === 'number' && Number.isFinite(m.cartDiscountPct)
+        ? Math.min(100, Math.max(0, Math.round(m.cartDiscountPct)))
+        : 0
+    setCartDiscountPct(cp)
+    setCartDiscountReason(
+      typeof m.cartDiscountReason === 'string' ? m.cartDiscountReason.trim().slice(0, 200) : ''
+    )
+    setRemiseModal(null)
+    setMotifCommentPreset(null)
+    setMotifCommentDraft('')
+    setMotifCommentError(null)
+    setMotifPickerOpen(false)
+  }, [])
+
+  const saveShortcutDraft = useCallback(() => {
+    const err = validateUniqueShortcuts(shortcutEditDraft)
+    if (err) {
+      showToast({ variant: 'error', message: err })
+      return
+    }
+    writeKeyboardShortcuts(shortcutEditDraft)
+    setKbdShortcuts(readKeyboardShortcuts())
+    showToast({ variant: 'success', message: 'Raccourcis enregistrés pour cet appareil.' })
+  }, [shortcutEditDraft, showToast])
+
+  const putCartOnHold = useCallback(async () => {
+    if (refundMode) {
+      showToast({
+        variant: 'error',
+        message:
+          'Impossible en mode remboursement. Terminez ou quittez le remboursement avant de mettre un panier en attente.'
+      })
+      return
+    }
+    if (lines.length === 0) {
+      showToast({ message: 'Panier vide.' })
+      return
+    }
+    if (heldCarts.length >= MAX_HELD_CARTS) {
+      showToast({
+        variant: 'error',
+        message: `Maximum ${MAX_HELD_CARTS} paniers en attente. Reprenez ou supprimez-en un.`
+      })
+      return
+    }
+    const dn = data.printing.deviceName?.trim()
+    if (!dn) {
+      showToast({
+        variant: 'error',
+        message:
+          'Aucune imprimante n’est sélectionnée (menu Impression). Le ticket d’attente est obligatoire — panier non mis de côté.'
+      })
+      return
+    }
+    const atIso = new Date().toISOString()
+    const ticketNum = nextHoldTicketNum
+    const ticketLabel = `Ticket ${formatOrderDigits(ticketNum)}`
+    const logo = await window.caisse.getLogoDataUrl(data.association.logoFile)
+    const r = await window.caisse.printHoldSlip({
+      ticketLabel,
+      associationName: data.association.name.trim(),
+      eventName: selectedEvent?.name?.trim() ?? '—',
+      atIso,
+      deviceName: dn,
+      logoDataUrl: logo,
+      silent: data.printing.silentPrint
+    })
+    if (!r.ok) {
+      showToast({
+        variant: 'error',
+        message: r.error ?? 'Impression impossible — panier non mis en attente.'
+      })
+      return
+    }
+    const mirror: RemoteCaisseMirror = structuredClone(remoteMirrorPayload)
+    setHeldCarts((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        displayName: ticketLabel,
+        totalCents,
+        lineCount: lines.length,
+        savedAt: Date.now(),
+        mirror
+      }
+    ])
+    setNextHoldTicketNum(ticketNum + 1)
+    clearCart()
+    setRefundMode(false)
+    showToast({
+      variant: 'success',
+      message: `${ticketLabel} : ticket d’attente imprimé, panier mis de côté.`
+    })
+  }, [
+    refundMode,
+    lines.length,
+    heldCarts.length,
+    nextHoldTicketNum,
+    data.printing.deviceName,
+    data.printing.silentPrint,
+    data.association.name,
+    data.association.logoFile,
+    selectedEvent?.name,
+    remoteMirrorPayload,
+    totalCents,
+    clearCart,
+    showToast
+  ])
+
+  const restoreHeldCart = useCallback(
+    (entryId: string) => {
+      const entry = heldCarts.find((h) => h.id === entryId)
+      if (!entry) return
+      const hasActive = Object.values(quantities).some((q) => (q ?? 0) > 0)
+      if (hasActive) {
+        showToast({
+          variant: 'error',
+          message:
+            'Le panier actuel n’est pas vide : videz-le ou mettez-le en attente avant de reprendre un autre panier.'
+        })
+        return
+      }
+      if (refundMode) {
+        showToast({
+          variant: 'error',
+          message: 'Quittez le mode remboursement avant de reprendre un panier en attente.'
+        })
+        return
+      }
+      applyMirrorToCart(structuredClone(entry.mirror))
+      setHeldCarts((prev) => prev.filter((h) => h.id !== entryId))
+      showToast({ message: 'Panier repris.' })
+    },
+    [heldCarts, quantities, refundMode, applyMirrorToCart, showToast]
+  )
+
+  const discardHeldCart = useCallback(
+    (entryId: string) => {
+      setHeldCarts((prev) => prev.filter((h) => h.id !== entryId))
+      showToast({ message: 'Panier en attente supprimé (non encaissé).' })
+    },
+    [showToast]
+  )
+
   const commitLineRemise = useCallback((productId: string, pct: number, reason: string) => {
     setDiscountPctByProduct((prev) => {
       const n = { ...prev }
@@ -516,17 +788,31 @@ export default function CaisseView(): JSX.Element {
     setRemiseModal(null)
   }, [])
 
-  const confirmBenevolePrenom = useCallback(() => {
-    const p = benevolePrenom.trim()
-    if (!p) {
-      setBenevoleError('Le prénom est obligatoire.')
+  const applyDiscountMotifPreset = useCallback((preset: DiscountMotifPreset) => {
+    setMotifPickerOpen(false)
+    if (preset.commentRequired) {
+      setMotifCommentPreset(preset)
+      setMotifCommentDraft('')
+      setMotifCommentError(null)
+    } else {
+      const label = preset.label.trim().slice(0, 200)
+      setRemiseModal((m) => (m ? { ...m, draftReason: label } : m))
+    }
+  }, [])
+
+  const confirmMotifComment = useCallback(() => {
+    if (!motifCommentPreset) return
+    const t = motifCommentDraft.trim()
+    if (!t) {
+      setMotifCommentError('Ce champ est obligatoire.')
       return
     }
-    setRemiseModal((m) => (m ? { ...m, draftReason: formatBenevoleMotif(p) } : m))
-    setBenevoleModalOpen(false)
-    setBenevolePrenom('')
-    setBenevoleError(null)
-  }, [benevolePrenom])
+    const text = formatDiscountMotifReason(motifCommentPreset.label, t)
+    setRemiseModal((m) => (m ? { ...m, draftReason: text } : m))
+    setMotifCommentPreset(null)
+    setMotifCommentDraft('')
+    setMotifCommentError(null)
+  }, [motifCommentPreset, motifCommentDraft])
 
   const openPaymentChoose = useCallback(() => {
     if (lines.length === 0) return
@@ -603,6 +889,8 @@ export default function CaisseView(): JSX.Element {
         orderNumber,
         eventId: selectedEvent.id,
         eventName: selectedEvent.name,
+        eventDate: selectedEvent.date,
+        eventNotes: selectedEvent.notes,
         associationName: assocName,
         lines: snapLines.map((l): SaleLineSnapshot => {
           const lineTotalCents = l.unitCents * l.qty
@@ -795,6 +1083,62 @@ export default function CaisseView(): JSX.Element {
     cartDiscountReason
   ])
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (shortcutsOpen) return
+      const ks = readKeyboardShortcuts()
+      if (eventMatchesShortcut(e, ks.help)) {
+        e.preventDefault()
+        setShortcutsOpen(true)
+        return
+      }
+      if (eventMatchesShortcut(e, ks.holdCart)) {
+        e.preventDefault()
+        void putCartOnHold()
+        return
+      }
+      if (eventMatchesShortcut(e, ks.clearCart)) {
+        e.preventDefault()
+        clearCart()
+        return
+      }
+      if (eventMatchesShortcut(e, ks.toggleRefund)) {
+        e.preventDefault()
+        toggleRefundMode()
+        return
+      }
+      if (eventMatchesShortcut(e, ks.payCash)) {
+        e.preventDefault()
+        openPaymentCash()
+        return
+      }
+      if (eventMatchesShortcut(e, ks.payCard)) {
+        e.preventDefault()
+        openPaymentCard()
+        return
+      }
+      const el = e.target as HTMLElement | null
+      if (!el) return
+      const inField =
+        el.tagName === 'INPUT' ||
+        el.tagName === 'TEXTAREA' ||
+        el.tagName === 'SELECT' ||
+        el.isContentEditable
+      if (inField) return
+      if (eventMatchesShortcut(e, ks.focusSearch)) {
+        e.preventDefault()
+        productSearchInputRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [putCartOnHold, shortcutsOpen, clearCart, toggleRefundMode, openPaymentCash, openPaymentCard])
+
+  const lowStockProducts = useMemo(
+    () => listLowStockProducts(products, stock),
+    [products, stock]
+  )
+
   return (
     <>
       <div className="main">
@@ -803,6 +1147,16 @@ export default function CaisseView(): JSX.Element {
             <div className="banner-warn" role="status">
               Sélectionnez un <strong>événement actif</strong> (menu Événements ou liste ci-dessous)
               pour encaisser.
+            </div>
+          )}
+          {lowStockProducts.length > 0 && canSell && !eventClosed && (
+            <div className="banner-warn banner-stock-low" role="status">
+              <strong>Stock bas :</strong>{' '}
+              {lowStockProducts
+                .slice(0, 6)
+                .map((p) => `${p.emoji} ${p.name}`)
+                .join(' · ')}
+              {lowStockProducts.length > 6 ? ` (+${lowStockProducts.length - 6})` : ''}
             </div>
           )}
           {data.selectedEventId && selectedEvent && eventClosed && (
@@ -818,6 +1172,36 @@ export default function CaisseView(): JSX.Element {
               de la session pour cet événement, puis validez (ci-dessous ou dans l’encart).
             </div>
           )}
+          <div className="caisse-toolbar caisse-toolbar--tiered">
+            <div className="toolbar-cluster toolbar-cluster--primary">
+            <div className="caisse-toolbar-search-wrap">
+              <label className="caisse-toolbar-label" htmlFor="caisse-product-search-input">
+                Recherche articles
+              </label>
+              <input
+                id="caisse-product-search-input"
+                ref={productSearchInputRef}
+                type="search"
+                className="caisse-product-search"
+                placeholder={`Tapez un nom d’article… (${kbdShortcuts.focusSearch} pour focus)`}
+                value={productSearch}
+                onChange={(e) => setProductSearch(e.target.value)}
+                aria-label="Filtrer les articles par nom"
+              />
+            </div>
+            </div>
+            <div className="toolbar-cluster toolbar-cluster--secondary">
+            <div className="caisse-toolbar-actions">
+              <button
+                type="button"
+                className="btn btn-secondary caisse-toolbar-shortcuts-btn"
+                onClick={() => setShortcutsOpen(true)}
+              >
+                Raccourcis ({kbdShortcuts.help})
+              </button>
+            </div>
+            </div>
+          </div>
           <div className="tabs" role="tablist" aria-label="Catégories">
             <button
               type="button"
@@ -847,12 +1231,12 @@ export default function CaisseView(): JSX.Element {
               {filtered.map((p) => {
                 const avail = stockAvailable(p, stock)
                 const disabled = !canSell || (!refundMode && p.trackStock && avail <= 0)
-                const low = p.trackStock && avail > 0 && avail <= 5
+                const low = isLowStock(p, avail)
                 return (
                   <button
                     key={p.id}
                     type="button"
-                    className={`product-card${disabled ? ' disabled' : ''}`}
+                    className={`product-card${disabled ? ' disabled' : ''}${low ? ' stock-low' : ''}`}
                     disabled={disabled}
                     onClick={() => add(p)}
                     title={
@@ -896,67 +1280,145 @@ export default function CaisseView(): JSX.Element {
           <div className="cart-head">
             <div className="cart-head-top">
               <h2>{refundMode ? 'Remboursement' : 'Panier'}</h2>
+              <div className="cart-head-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-hold-cart"
+                  disabled={!canSell || refundMode || lines.length === 0}
+                  title={`Imprime un ticket Ticket NNN d’attente puis met le panier de côté (${kbdShortcuts.holdCart})`}
+                  onClick={() => void putCartOnHold()}
+                >
+                  Mettre en attente
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-cart-clear"
+                  disabled={lines.length === 0}
+                  onClick={clearCart}
+                >
+                  Vider le panier
+                </button>
+              </div>
+            </div>
+            <div className="cart-options-strip" role="group" aria-label="Options de caisse">
               <button
                 type="button"
-                className="btn btn-secondary btn-cart-clear"
-                disabled={lines.length === 0}
-                onClick={clearCart}
+                role="switch"
+                aria-checked={refundMode}
+                aria-label="Mode remboursement"
+                disabled={eventClosed}
+                className={`cart-option-card cart-option-refund${refundMode ? ' is-on' : ''}${
+                  eventClosed ? ' is-disabled' : ''
+                }`}
+                onClick={() => toggleRefundMode()}
               >
-                Vider le panier
+                <span className="cart-option-card__icon" aria-hidden>
+                  ↩
+                </span>
+                <span className="cart-option-card__body">
+                  <span className="cart-option-card__title">Rembours.</span>
+                  <span className="cart-option-card__hint">
+                    Retour ou annulation (même flux que la vente)
+                  </span>
+                </span>
+                <span className="cart-switch" aria-hidden>
+                  <span className="cart-switch__track" />
+                  <span className="cart-switch__thumb" />
+                </span>
+              </button>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={remoteDisplayOn}
+                aria-label="Affichage client sur un second écran ou navigateur"
+                className={`cart-option-card cart-option-display${remoteDisplayOn ? ' is-on' : ''}`}
+                onClick={() => void setRemoteClientEnabled(!remoteDisplayOn)}
+              >
+                <span className="cart-option-card__icon" aria-hidden>
+                  🖥
+                </span>
+                <span className="cart-option-card__body">
+                  <span className="cart-option-card__title">Écran client</span>
+                  <span className="cart-option-card__hint">
+                    Panier visible sur navigateur ou 2ᵉ écran (menu Écran client pour l’URL)
+                  </span>
+                </span>
+                <span className="cart-switch" aria-hidden>
+                  <span className="cart-switch__track" />
+                  <span className="cart-switch__thumb" />
+                </span>
               </button>
             </div>
-            <div className="cart-head-row">
-              <label className="refund-toggle">
-                <input
-                  type="checkbox"
-                  checked={refundMode}
-                  disabled={eventClosed}
-                  onChange={() => toggleRefundMode()}
-                />
-                <span>Mode remboursement</span>
-              </label>
-            </div>
-            <label className="check-label cart-remote-toggle">
-              <input
-                type="checkbox"
-                checked={remoteDisplayOn}
-                onChange={(e) => void setRemoteClientEnabled(e.target.checked)}
-              />
-              <span>Affichage client (navigateur / 2ᵉ écran)</span>
-            </label>
-            <span>
+            {heldCarts.length > 0 ? (
+              <div className="held-carts-bar" aria-label="Paniers en attente">
+                <div className="held-carts-list">
+                  {heldCarts.map((h) => (
+                    <div key={h.id} className="held-cart-row">
+                      <div className="held-cart-row-meta">
+                        <span className="held-cart-row-title">{h.displayName}</span>
+                        <span className="held-cart-row-sub">
+                          {formatMoney(h.totalCents)} · {h.lineCount} ligne{h.lineCount > 1 ? 's' : ''} ·{' '}
+                          {new Date(h.savedAt).toLocaleTimeString('fr-FR', {
+                            hour: '2-digit',
+                            minute: '2-digit'
+                          })}
+                        </span>
+                      </div>
+                      <div className="held-cart-row-actions">
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-held-restore"
+                          disabled={!canSell}
+                          onClick={() => restoreHeldCart(h.id)}
+                        >
+                          Reprendre
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-held-discard"
+                          onClick={() => discardHeldCart(h.id)}
+                        >
+                          Supprimer
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            <div className="cart-meta-row" role="status" aria-live="polite">
               {refundMode && refundSourceMeta?.orderNumber != null && refundSourceMeta.orderNumber > 0 ? (
-                <>
-                  <span className="refund-source-pill" title="Remboursement lié à une vente passée">
-                    Depuis commande {formatOrderDisplay(refundSourceMeta.orderNumber)}
-                  </span>
-                  {' · '}
-                </>
+                <span className="refund-source-pill" title="Remboursement lié à une vente passée">
+                  {formatOrderDisplay(refundSourceMeta.orderNumber)}
+                </span>
               ) : null}
-              {selectedEvent ? (
-                <>
-                  <span className="event-pill">{selectedEvent.name}</span>
-                  {' · '}
-                </>
-              ) : null}
-              {sessionInfo ? (
-                <>
-                  {' '}
-                  <span className="float-pill" title="Fond de caisse au démarrage de la session">
-                    Fond {formatMoney(sessionInfo.floatCents)}
-                  </span>
-                  {' '}
-                </>
-              ) : null}
-              {lines.length ? `${lines.length} ligne(s)` : 'Aucun article'}
-            </span>
+            </div>
           </div>
           <div className="cart-lines">
             {lines.length === 0 ? (
               <div className="empty-cart">
-                {refundMode
-                  ? 'Ajoutez les articles remboursés depuis la grille'
-                  : 'Ajoutez des articles depuis la grille'}
+                <EmptyState
+                  icon={refundMode ? '↩' : '🛒'}
+                  title={refundMode ? 'Aucune ligne de remboursement' : 'Panier vide'}
+                  description={
+                    refundMode
+                      ? 'Ajoutez les articles depuis la grille ; les quantités sont plafonnées par la vente d’origine.'
+                      : 'Ajoutez des articles depuis la grille à gauche, ou utilisez la recherche pour aller plus vite.'
+                  }
+                  actions={
+                    !refundMode ? (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => {
+                          productSearchInputRef.current?.focus()
+                        }}
+                      >
+                        Aller à la recherche
+                      </button>
+                    ) : undefined
+                  }
+                />
               </div>
             ) : (
               lines.map(
@@ -964,17 +1426,58 @@ export default function CaisseView(): JSX.Element {
                   const maxRef = refundMaxByProduct?.[p.id]
                   const atCap = refundMode && maxRef != null && qty >= maxRef
                   return (
-                    <div key={p.id} className="line">
-                      <div className="line-top">
-                        <span className="name">
-                          {p.emoji} {p.name}
-                        </span>
-                        <span className="unit">{formatMoney(unitCents)} net / u. ×</span>
+                    <div
+                      key={p.id}
+                      className={`line cart-line${refundMode ? ' cart-line--refund' : ''}`}
+                    >
+                      <div className="line-head">
+                        <div className="cart-line-product">
+                          <span className="cart-line-emoji" aria-hidden>
+                            {p.emoji}
+                          </span>
+                          <span className="name" title={`${p.emoji} ${p.name}`}>
+                            {p.name}
+                          </span>
+                        </div>
+                        <div className="line-controls line-controls--compact">
+                          <button
+                            type="button"
+                            className="qbtn"
+                            aria-label="Diminuer"
+                            disabled={!canSell}
+                            onClick={() => setQty(p.id, qty - 1)}
+                          >
+                            −
+                          </button>
+                          <span className="qty">{qty}</span>
+                          <button
+                            type="button"
+                            className="qbtn"
+                            aria-label="Augmenter"
+                            onClick={() => setQty(p.id, qty + 1)}
+                            disabled={
+                              !canSell ||
+                              atCap ||
+                              (!refundMode && p.trackStock && qty >= stockAvailable(p, stock))
+                            }
+                          >
+                            +
+                          </button>
+                          <button
+                            type="button"
+                            className="qbtn danger"
+                            aria-label="Retirer"
+                            disabled={!canSell}
+                            onClick={() => setQty(p.id, 0)}
+                          >
+                            ×
+                          </button>
+                        </div>
                       </div>
                       {!refundMode ? (
-                        <div className="line-adjust">
-                          <label className="line-adjust-field line-adjust-field--price">
-                            <span>Prix unitaire TTC (€)</span>
+                        <div className="line-inline-tools">
+                          <label className="line-pu-field">
+                            <span className="line-pu-field__lbl">PU TTC €</span>
                             <input
                               type="number"
                               min={0}
@@ -997,92 +1500,62 @@ export default function CaisseView(): JSX.Element {
                               }}
                             />
                           </label>
-                          <div className="line-adjust-actions">
+                          <button
+                            type="button"
+                            className={
+                              'btn-remise-cart btn-remise-cart--line' +
+                              (discountPercent > 0 ? ' btn-remise-cart--active' : '')
+                            }
+                            disabled={!canSell}
+                            title="Remise sur cette ligne"
+                            onClick={() =>
+                              setRemiseModal({
+                                scope: 'line',
+                                productId: p.id,
+                                draftPct: discountPercent > 0 ? String(discountPercent) : '',
+                                draftReason: discountReason
+                              })
+                            }
+                          >
+                            <span className="btn-remise-cart__icon" aria-hidden>
+                              %
+                            </span>
+                            <span className="btn-remise-cart__label">Remise ligne</span>
+                            {discountPercent > 0 ? (
+                              <span className="btn-remise-cart__badge">{discountPercent} %</span>
+                            ) : null}
+                          </button>
+                          {priceOverrides[p.id] != null ? (
                             <button
                               type="button"
-                              className={
-                                'btn-remise-cart' +
-                                (discountPercent > 0 ? ' btn-remise-cart--active' : '')
-                              }
+                              className="btn btn-ghost btn-compact btn-catalog"
                               disabled={!canSell}
-                              title="Remise sur cette ligne"
+                              title="Rétablir le prix de base de l’article (sans surcote manuelle)"
                               onClick={() =>
-                                setRemiseModal({
-                                  scope: 'line',
-                                  productId: p.id,
-                                  draftPct: discountPercent > 0 ? String(discountPercent) : '',
-                                  draftReason: discountReason
+                                setPriceOverrides((prev) => {
+                                  const n = { ...prev }
+                                  delete n[p.id]
+                                  return n
                                 })
                               }
                             >
-                              <span className="btn-remise-cart__icon" aria-hidden>
-                                %
-                              </span>
-                              <span className="btn-remise-cart__label">Remise</span>
-                              {discountPercent > 0 ? (
-                                <span className="btn-remise-cart__badge">{discountPercent} %</span>
-                              ) : null}
+                              Prix de base article
                             </button>
-                            {priceOverrides[p.id] != null ? (
-                              <button
-                                type="button"
-                                className="btn btn-ghost btn-compact"
-                                disabled={!canSell}
-                                onClick={() =>
-                                  setPriceOverrides((prev) => {
-                                    const n = { ...prev }
-                                    delete n[p.id]
-                                    return n
-                                  })
-                                }
-                              >
-                                Prix catalogue
-                              </button>
-                            ) : null}
-                          </div>
+                          ) : null}
                         </div>
                       ) : discountPercent > 0 || listUnitCents !== unitCents ? (
-                        <div className="line-readonly-muted">
+                        <div className="line-readonly-muted line-readonly-muted--compact">
                           Barème {formatMoney(listUnitCents)} / u.
                           {discountPercent > 0 ? ` · remise ${discountPercent} %` : ''}
                           {discountReason.trim() ? ` — ${discountReason.trim()}` : ''}
                         </div>
                       ) : null}
-                      <div className="line-controls">
-                        <button
-                          type="button"
-                          className="qbtn"
-                          aria-label="Diminuer"
-                          disabled={!canSell}
-                          onClick={() => setQty(p.id, qty - 1)}
-                        >
-                          −
-                        </button>
-                        <span className="qty">{qty}</span>
-                        <button
-                          type="button"
-                          className="qbtn"
-                          aria-label="Augmenter"
-                          onClick={() => setQty(p.id, qty + 1)}
-                          disabled={
-                            !canSell ||
-                            atCap ||
-                            (!refundMode && p.trackStock && qty >= stockAvailable(p, stock))
-                          }
-                        >
-                          +
-                        </button>
-                        <button
-                          type="button"
-                          className="qbtn danger"
-                          aria-label="Retirer"
-                          disabled={!canSell}
-                          onClick={() => setQty(p.id, 0)}
-                        >
-                          ×
-                        </button>
+                      <div className="line-foot">
+                        <span className="line-foot-unit">
+                          {formatMoney(unitCents)} / u. × {qty}
+                        </span>
+                        <span className="line-foot-total">{formatMoney(unitCents * qty)}</span>
                       </div>
-                      <div className="line-total">Sous-total {formatMoney(unitCents * qty)}</div>
                     </div>
                   )
                 }
@@ -1107,7 +1580,8 @@ export default function CaisseView(): JSX.Element {
                 <button
                   type="button"
                   className={
-                    'btn-remise-cart' + (cartDiscountPct > 0 ? ' btn-remise-cart--active' : '')
+                    'btn-remise-cart btn-remise-cart--total' +
+                    (cartDiscountPct > 0 ? ' btn-remise-cart--active' : '')
                   }
                   disabled={!canSell}
                   title="Remise sur le total du panier"
@@ -1120,9 +1594,9 @@ export default function CaisseView(): JSX.Element {
                   }
                 >
                   <span className="btn-remise-cart__icon" aria-hidden>
-                    %
+                    ∑
                   </span>
-                  <span className="btn-remise-cart__label">Remise totale</span>
+                  <span className="btn-remise-cart__label">Remise sur total panier</span>
                   {cartDiscountPct > 0 ? (
                     <span className="btn-remise-cart__badge">{cartDiscountPct} %</span>
                   ) : null}
@@ -1164,6 +1638,9 @@ export default function CaisseView(): JSX.Element {
                 </>
               )}
             </div>
+            <div className="cart-lines-count" aria-live="polite">
+              {lines.length ? `${lines.length} ligne${lines.length > 1 ? 's' : ''}` : 'Panier vide'}
+            </div>
           </div>
         </aside>
       </div>
@@ -1203,12 +1680,16 @@ export default function CaisseView(): JSX.Element {
 
       {remiseModal ? (
         <div
+          ref={remiseOverlayRef}
           className="overlay remise-overlay"
           role="dialog"
           aria-modal="true"
           aria-labelledby="remise-title"
           onClick={() => {
-            setBenevoleModalOpen(false)
+            setMotifCommentPreset(null)
+            setMotifCommentDraft('')
+            setMotifCommentError(null)
+            setMotifPickerOpen(false)
             setRemiseModal(null)
           }}
         >
@@ -1224,7 +1705,7 @@ export default function CaisseView(): JSX.Element {
                     }
                     const v = parseFloat(t)
                     if (!Number.isFinite(v) || v < 0) {
-                      window.alert('Pourcentage invalide (0 à 100).')
+                      showToast({ variant: 'error', message: 'Pourcentage invalide (0 à 100).' })
                       return
                     }
                     commitCartRemise(Math.min(100, Math.round(v)), remiseModal.draftReason)
@@ -1292,29 +1773,35 @@ export default function CaisseView(): JSX.Element {
                           }
                         />
                       </label>
-                      <div className="remise-modal-inline">
-                        <button
-                          type="button"
-                          className="btn-benevole"
-                          disabled={!canSell}
-                          onClick={() => {
-                            setBenevolePrenom('')
-                            setBenevoleError(null)
-                            setBenevoleModalOpen(true)
-                          }}
-                        >
-                          <span className="btn-benevole__emoji" aria-hidden>
-                            🤝
-                          </span>
-                          <span className="btn-benevole__text">Motif bénévole</span>
-                        </button>
+                      <div className="remise-motif-ask">
+                        <p className="sub">Souhaitez-vous utiliser un motif enregistré ?</p>
+                        <div className="remise-motif-ask-row">
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => setMotifPickerOpen(false)}
+                          >
+                            Non
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={!canSell}
+                            onClick={() => setMotifPickerOpen(true)}
+                          >
+                            Oui, choisir
+                          </button>
+                        </div>
                       </div>
                       <div className="modal-actions remise-modal-actions">
                         <button
                           type="button"
                           className="btn btn-ghost"
                           onClick={() => {
-                            setBenevoleModalOpen(false)
+                            setMotifCommentPreset(null)
+                            setMotifCommentDraft('')
+                            setMotifCommentError(null)
+                            setMotifPickerOpen(false)
                             setRemiseModal(null)
                           }}
                         >
@@ -1363,7 +1850,7 @@ export default function CaisseView(): JSX.Element {
                     }
                     const v = parseFloat(t)
                     if (!Number.isFinite(v) || v < 0) {
-                      window.alert('Pourcentage invalide (0 à 100).')
+                      showToast({ variant: 'error', message: 'Pourcentage invalide (0 à 100).' })
                       return
                     }
                     commitLineRemise(
@@ -1435,29 +1922,35 @@ export default function CaisseView(): JSX.Element {
                           }
                         />
                       </label>
-                      <div className="remise-modal-inline">
-                        <button
-                          type="button"
-                          className="btn-benevole"
-                          disabled={!canSell}
-                          onClick={() => {
-                            setBenevolePrenom('')
-                            setBenevoleError(null)
-                            setBenevoleModalOpen(true)
-                          }}
-                        >
-                          <span className="btn-benevole__emoji" aria-hidden>
-                            🤝
-                          </span>
-                          <span className="btn-benevole__text">Motif bénévole</span>
-                        </button>
+                      <div className="remise-motif-ask">
+                        <p className="sub">Souhaitez-vous utiliser un motif enregistré ?</p>
+                        <div className="remise-motif-ask-row">
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() => setMotifPickerOpen(false)}
+                          >
+                            Non
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={!canSell}
+                            onClick={() => setMotifPickerOpen(true)}
+                          >
+                            Oui, choisir
+                          </button>
+                        </div>
                       </div>
                       <div className="modal-actions remise-modal-actions">
                         <button
                           type="button"
                           className="btn btn-ghost"
                           onClick={() => {
-                            setBenevoleModalOpen(false)
+                            setMotifCommentPreset(null)
+                            setMotifCommentDraft('')
+                            setMotifCommentError(null)
+                            setMotifPickerOpen(false)
                             setRemiseModal(null)
                           }}
                         >
@@ -1487,47 +1980,85 @@ export default function CaisseView(): JSX.Element {
         </div>
       ) : null}
 
-      {benevoleModalOpen && remiseModal ? (
+      {motifPickerOpen && remiseModal ? (
         <div
+          ref={motifPickerOverlayRef}
+          className="overlay motif-picker-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="motif-picker-title"
+          onClick={() => setMotifPickerOpen(false)}
+        >
+          <div className="modal discount-motif-picker-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 id="motif-picker-title">Motifs enregistrés</h3>
+            <p className="sub">Sélectionnez un motif à insérer dans le champ « Motif (facultatif) ».</p>
+            <div className="discount-motif-strip">
+              {discountMotifPresets.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className="btn-benevole"
+                  disabled={!canSell}
+                  onClick={() => applyDiscountMotifPreset(preset)}
+                >
+                  <span className="btn-benevole__emoji" aria-hidden>
+                    🏷️
+                  </span>
+                  <span className="btn-benevole__text">{preset.label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setMotifPickerOpen(false)}>
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {motifCommentPreset && remiseModal ? (
+        <div
+          ref={benevoleOverlayRef}
           className="overlay benevole-overlay"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="benevole-modal-title"
+          aria-labelledby="motif-comment-modal-title"
           onClick={() => {
-            setBenevoleModalOpen(false)
-            setBenevolePrenom('')
-            setBenevoleError(null)
+            setMotifCommentPreset(null)
+            setMotifCommentDraft('')
+            setMotifCommentError(null)
           }}
         >
           <div className="modal benevole-prenom-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 id="benevole-modal-title">Motif bénévole</h3>
+            <h3 id="motif-comment-modal-title">{motifCommentPreset.label}</h3>
             <p className="sub">
-              Indiquez le <strong>prénom</strong> du bénévole : il sera ajouté au motif de remise
-              (&quot;Bénévole — …&quot;).
+              Saisissez le détail du motif : il sera enregistré sous la forme{' '}
+              <strong>&quot;{motifCommentPreset.label} — …&quot;</strong>.
             </p>
             <label className="field">
-              <span>Prénom du bénévole</span>
+              <span>{motifCommentPreset.commentLabel}</span>
               <input
                 type="text"
                 autoFocus
-                maxLength={80}
+                maxLength={120}
                 className="mono"
-                value={benevolePrenom}
+                value={motifCommentDraft}
                 onChange={(e) => {
-                  setBenevolePrenom(e.target.value)
-                  setBenevoleError(null)
+                  setMotifCommentDraft(e.target.value)
+                  setMotifCommentError(null)
                 }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault()
-                    confirmBenevolePrenom()
+                    confirmMotifComment()
                   }
                 }}
               />
             </label>
-            {benevoleError ? (
+            {motifCommentError ? (
               <p className="auth-err" role="alert">
-                {benevoleError}
+                {motifCommentError}
               </p>
             ) : null}
             <div className="modal-actions">
@@ -1535,14 +2066,14 @@ export default function CaisseView(): JSX.Element {
                 type="button"
                 className="btn btn-ghost"
                 onClick={() => {
-                  setBenevoleModalOpen(false)
-                  setBenevolePrenom('')
-                  setBenevoleError(null)
+                  setMotifCommentPreset(null)
+                  setMotifCommentDraft('')
+                  setMotifCommentError(null)
                 }}
               >
                 Annuler
               </button>
-              <button type="button" className="btn btn-primary" onClick={confirmBenevolePrenom}>
+              <button type="button" className="btn btn-primary" onClick={confirmMotifComment}>
                 Valider
               </button>
             </div>
@@ -1560,6 +2091,7 @@ export default function CaisseView(): JSX.Element {
         refundMode={refundMode}
         initialStep={paymentModalInitial}
         onPaymentDisplayUpdate={onPaymentDisplayUpdate}
+        cashPaymentUi={data.cashPaymentUi === 'express' ? 'express' : 'detail'}
       />
 
       {showSuccess && lastPayment && (
@@ -1590,7 +2122,7 @@ export default function CaisseView(): JSX.Element {
                 : 'Paiement enregistré — le panier a été vidé.'}
             </p>
             {lastOrderNumber != null && (
-              <div className="order-banner mono">Commande {formatOrderDisplay(lastOrderNumber)}</div>
+              <div className="order-banner mono">{formatOrderDisplay(lastOrderNumber)}</div>
             )}
             <div className="receipt pay-receipt-box">
               {selectedEvent ? <div>Événement : {selectedEvent.name}</div> : null}
@@ -1639,6 +2171,83 @@ export default function CaisseView(): JSX.Element {
           </div>
         </div>
       )}
+      {shortcutsOpen ? (
+        <div
+          ref={shortcutsOverlayRef}
+          className="overlay shortcuts-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="caisse-shortcuts-title"
+          onClick={() => setShortcutsOpen(false)}
+        >
+          <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+            <h3 id="caisse-shortcuts-title">Raccourcis clavier</h3>
+            <p className="sub">
+              Touches autorisées : <strong>F1–F12</strong> ou la barre oblique <strong>/</strong>. Chaque touche
+              doit être <strong>unique</strong>. Le retour encaissement est aussi actif depuis les autres vues.
+            </p>
+            <table className="shortcuts-table">
+              <thead>
+                <tr>
+                  <th scope="col">Touche</th>
+                  <th scope="col">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {SHORTCUT_IDS.map((id) => (
+                  <tr key={id}>
+                    <td>
+                      <label htmlFor={`caisse-sc-${id}`} className="sr-only">
+                        {SHORTCUT_LABELS[id]}
+                      </label>
+                      <select
+                        id={`caisse-sc-${id}`}
+                        className="input-inline mono"
+                        value={shortcutEditDraft[id]}
+                        onChange={(e) =>
+                          setShortcutEditDraft((d) => ({ ...d, [id]: e.target.value }))
+                        }
+                      >
+                        {CHOOSEABLE_SHORTCUT_TOKENS.map((t) => (
+                          <option key={t} value={t}>
+                            {t === '/' ? '/ (barre oblique)' : t}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <strong>{SHORTCUT_LABELS[id]}</strong>
+                      {id === 'gotoCaisse' ? (
+                        <span className="sub block">
+                          Raccourci global : fonctionne depuis toutes les vues de l’application.
+                        </span>
+                      ) : null}
+                      {id === 'holdCart' ? (
+                        <span className="sub block">
+                          Imprime le ticket « Ticket NNN d’attente » puis range le panier (imprimante requise).
+                        </span>
+                      ) : null}
+                      {id === 'focusSearch' ? (
+                        <span className="sub block">
+                          Hors champs de saisie (champ texte, zone de texte, liste déroulante).
+                        </span>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-secondary" onClick={() => void saveShortcutDraft()}>
+                Enregistrer
+              </button>
+              <button type="button" className="btn btn-primary" onClick={() => setShortcutsOpen(false)}>
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   )
 }

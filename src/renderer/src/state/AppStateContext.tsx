@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode
 } from 'react'
+import BootLoading from '@renderer/components/BootLoading'
 import type { AppPersistedData } from '@shared/catalog'
 
 type AppStateContextValue = {
@@ -94,11 +95,7 @@ export function AppStateProvider({ children }: { children: ReactNode }): JSX.Ele
   }, [data, loading, setData, patchData, logoHref, refreshData])
 
   if (!value) {
-    return (
-      <div className="boot-screen">
-        <p>Chargement…</p>
-      </div>
-    )
+    return <BootLoading />
   }
 
   return <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>

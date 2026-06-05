@@ -14,15 +14,30 @@ interface CaisseAPI {
       id: string
       displayName: string
       licenseAssociationCode: string | null
-      licenseAllowed: boolean
-      licenseReason: string | null
+      logoDataUrl: string | null
     }[]
     lastSelectedId: string | null
   }>
   createAssociation: (payload: {
     displayName: string
     licenseAssociationCode: string
-  }) => Promise<{ ok: true; id: string } | { ok: false; error: 'license'; message: string }>
+    adminRequest?: boolean
+  }) => Promise<
+    | { ok: true; id: string }
+    | { ok: true; result: 'admin_notified'; message: string; requestId: number | null }
+    | {
+        ok: false
+        error: 'license' | 'invalid_code' | 'server' | 'activate' | 'code_exists'
+        message: string
+        code?: string
+        serverName?: string
+      }
+  >
+  associationRequestCheck: () => Promise<
+    | { show: false }
+    | { show: true; requestId: number; title: string; message: string; status: 'approved' | 'rejected' }
+  >
+  associationRequestDismiss: (requestId: number) => Promise<{ ok: true } | { ok: false }>
   setActiveAssociation: (id: string) => Promise<
     { ok: true } | { ok: false; error: 'invalid' | 'license'; message?: string }
   >
@@ -43,13 +58,36 @@ interface CaisseAPI {
     appPath: string
     dataFile: string | null
     salesHistoryFile: string | null
+    appVersion: string
   }>
+  updateCheck: (payload?: { currentVersion?: string }) => Promise<
+    | {
+        ok: true
+        update_available: boolean | null
+        version_compare: number | null
+        version_compare_failed: boolean
+        latest: {
+          release_id: number
+          version: string
+          filename: string
+          file_size: number
+          created_at: string
+        } | null
+        download_endpoint: string
+      }
+    | { ok: false; message: string }
+  >
+  updateDownload: (payload: { releaseId: number; suggestedFilename?: string }) => Promise<
+    { ok: true; filePath: string } | { ok: false; message: string; cancelled?: boolean }
+  >
   getLicense: () => Promise<{
     hasKey: boolean
     maskedKey: string
     status: 'active' | 'inactive'
     displayStatus: 'inactive' | 'valid' | 'invalid' | 'unconfigured'
-    mode: 'none' | 'long' | 'short'
+    mode: 'none' | 'web'
+    verificationSource?: 'online' | 'offline_grace'
+    offlineGrace?: { lastVerifiedAtMs: number; validUntilMs: number }
     reason?: string
     detail?: string
     payloadSummary?: {
@@ -57,10 +95,38 @@ interface CaisseAPI {
       expiresAt: string | null
       associationsLabel: string
     }
-    keysHint?: string
+    webSettings?: {
+      projectCode: string
+      licenseKeyMasked: string
+    }
   }>
-  setLicense: (key: string) => Promise<{ ok: true }>
+  setLicense: (
+    payload:
+      | { web: null }
+      | { web: { licenseKey: string; projectCode?: string } }
+      | { licenseKey: string; projectCode?: string }
+  ) => Promise<{ ok: true } | { ok: false; message: string }>
+  testLicenseApi: (payload: {
+    licenseKey: string
+    projectCode?: string
+  }) => Promise<{ ok: true; message: string } | { ok: false; message: string }>
+  licenseMachineInventory: (payload: { adminPassword: string }) => Promise<
+    | {
+        ok: true
+        rows: {
+          licenseKey: string
+          maskedKey: string
+          status: string
+          expiresAt: string | null
+          linkedOnMachine: boolean
+          hasFreeActivationSlots: boolean
+        }[]
+        machineId: string
+      }
+    | { ok: false; message: string; code?: string }
+  >
   licenseCheckAssociation: () => Promise<{ ok: true } | { ok: false; reason: string }>
+  refreshLicenseData: () => Promise<{ ok: true; message: string } | { ok: false; message: string }>
   getData: () => Promise<AppPersistedData>
   setData: (data: AppPersistedData) => Promise<void>
   openExternal: (url: string) => Promise<{ ok: true }>
@@ -113,9 +179,24 @@ interface CaisseAPI {
   getLogoDataUrl: (fileName: string | null) => Promise<string | null>
   appendSale: (sale: SaleRecord) => Promise<void>
   listSales: () => Promise<SaleRecord[]>
+  syncEventSalesMetadata: (payload: {
+    eventId: string
+    eventName: string
+    eventDate: string
+    eventNotes: string
+  }) => Promise<{ updated: number }>
   listPrinters: () => Promise<{ name: string; displayName: string }[]>
   printTickets: (payload: {
     tickets: TicketUnitPayload[]
+    deviceName: string | null
+    logoDataUrl: string | null
+    silent?: boolean
+  }) => Promise<{ ok: boolean; error?: string }>
+  printHoldSlip: (payload: {
+    ticketLabel: string
+    associationName: string
+    eventName: string
+    atIso: string
     deviceName: string | null
     logoDataUrl: string | null
     silent?: boolean
@@ -167,7 +248,9 @@ interface CaisseAPI {
   remoteCaisseSetConfig: (payload: {
     enabled?: boolean
     regenerateToken?: boolean
-  }) => Promise<{ ok: true; token: string | null; enabled: boolean }>
+    tokenRequired?: boolean
+    remoteCaisseRequireToken?: 0 | 1
+  }) => Promise<{ ok: true; token: string | null; enabled: boolean; tokenRequired: boolean }>
   onRemoteCaisseStateSync: (cb: (state: RemoteCaisseMirror) => void) => () => void
   onRemoteCaisseRefreshData: (cb: () => void) => () => void
   onRemoteCaisseSaleDone: (cb: (p: { orderNumber: number; totalCents: number }) => void) => () => void
@@ -193,6 +276,38 @@ interface CaisseAPI {
     mode: 'full' | 'replace' | 'new'
     pin: string
   }) => Promise<{ ok: true; reload: boolean } | { ok: false; error: string }>
+  associationSyncCheck: () => Promise<
+    | {
+        ok: true
+        localRevision: number | null
+        check: {
+          has_server_snapshot: boolean
+          server_revision: number | null
+          client_current_revision: number | null
+          needs_download: boolean | null
+          client_is_aligned_with_server: boolean | null
+          file_size: number | null
+          sha256_hex: string | null
+          updated_at: string | null
+          download_endpoint?: string | null
+          hint?: string | null
+        }
+      }
+    | { ok: false; message: string; code?: string }
+  >
+  associationSyncUpload: (payload: { pin: string }) => Promise<
+    { ok: true; revision: number; message: string } | { ok: false; message: string; code?: string }
+  >
+  associationSyncDownloadApply: (payload: { pin: string }) => Promise<
+    { ok: true; revision: number; message: string } | { ok: false; message: string; code?: string }
+  >
+  associationSyncSetCartGate: (payload: {
+    hasCartLines: boolean
+    paymentOpen: boolean
+  }) => Promise<{ ok: true }>
+  associationSyncRestartLoop: () => Promise<{ ok: true }>
+  onAssociationAutoSyncStatus: (cb: (payload: { banner: string | null }) => void) => () => void
+  onAssociationSyncDataApplied: (cb: () => void) => () => void
 }
 
 declare global {

@@ -6,11 +6,12 @@ import {
   writeFileSync,
   rmSync
 } from 'fs'
-import { join } from 'path'
+import { extname, join } from 'path'
 import { randomUUID } from 'crypto'
 import { app } from 'electron'
 import type { AppPersistedData } from '../shared/catalog'
 import { factoryResetPersistedData } from '../shared/catalog'
+import { normalizeLicenseAssociationCode } from '../shared/associationCode.js'
 
 export const REGISTRY_FILENAME = 'associations-registry.json'
 export const ASSOCIATIONS_SUBDIR = 'associations'
@@ -78,6 +79,53 @@ export function getAssociationFolderPath(id: string): string {
   return associationDir(id)
 }
 
+function logoMimeFromFileName(fileName: string): string {
+  switch (extname(fileName).toLowerCase()) {
+    case '.png':
+      return 'image/png'
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg'
+    case '.gif':
+      return 'image/gif'
+    case '.webp':
+      return 'image/webp'
+    case '.svg':
+      return 'image/svg+xml'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
+/**
+ * Data URL du logo d’une association (pour l’écran de choix de profil), si présent sur disque.
+ */
+export function readAssociationLogoDataUrl(associationId: string): string | null {
+  const dataPath = join(associationDir(associationId), DATA_FILENAME)
+  if (!existsSync(dataPath)) return null
+  let fileName: string | null = null
+  try {
+    const raw = JSON.parse(readFileSync(dataPath, 'utf-8')) as AppPersistedData
+    const f = raw?.association?.logoFile
+    fileName = typeof f === 'string' && f.length > 0 ? f : null
+  } catch {
+    return null
+  }
+  if (!fileName) return null
+  const full = join(associationDir(associationId), fileName)
+  if (!existsSync(full)) return null
+  try {
+    const buf = readFileSync(full)
+    const mime = logoMimeFromFileName(fileName)
+    if (mime === 'image/svg+xml') {
+      return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(buf.toString('utf-8'))}`
+    }
+    return `data:${mime};base64,${buf.toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
 /** Dossier parent contenant toutes les associations (`…/userData/associations`). */
 export function associationsRootDir(): string {
   return join(rootUserData(), ASSOCIATIONS_SUBDIR)
@@ -110,12 +158,15 @@ export function readRegistry(): Registry {
         .filter((x) => x && typeof x.id === 'string' && typeof x.displayName === 'string')
         .map((x) => {
           const codeRaw = (x as AssociationListItem).licenseAssociationCode
-          const licenseAssociationCode =
-            typeof codeRaw === 'string' && codeRaw.trim()
-              ? codeRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
-              : codeRaw === null
-                ? null
-                : undefined
+          let licenseAssociationCode: string | null | undefined
+          if (typeof codeRaw === 'string' && codeRaw.trim()) {
+            const norm = normalizeLicenseAssociationCode(codeRaw.trim())
+            licenseAssociationCode = norm ?? undefined
+          } else if (codeRaw === null) {
+            licenseAssociationCode = null
+          } else {
+            licenseAssociationCode = undefined
+          }
           return {
             id: x.id,
             displayName: x.displayName,
@@ -159,6 +210,26 @@ export function updateAssociationDisplayName(id: string, displayName: string): v
 }
 
 /** Met à jour nom + code association dans le registre (après sauvegarde caisse-data). */
+/**
+ * Retire le code association du registre et du fichier caisse-data (profil plus lié à une ligne serveur).
+ */
+export function clearLicenseAssociationCodeForAssociation(id: string): void {
+  const reg = readRegistry()
+  const item = reg.items.find((x) => x.id === id)
+  if (!item) return
+  item.licenseAssociationCode = null
+  writeRegistry(reg)
+  const p = join(associationDir(id), DATA_FILENAME)
+  if (!existsSync(p)) return
+  try {
+    const data = JSON.parse(readFileSync(p, 'utf-8')) as AppPersistedData
+    data.association.licenseAssociationCode = null
+    writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8')
+  } catch {
+    /* ignore */
+  }
+}
+
 export function updateAssociationRegistryFromPersistedData(
   id: string,
   displayName: string,
@@ -174,9 +245,7 @@ export function updateAssociationRegistryFromPersistedData(
 }
 
 function normalizeAssocCode(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  const t = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
-  return t.length >= 2 ? t : null
+  return normalizeLicenseAssociationCode(raw ?? null)
 }
 
 /** Lit le code association depuis le fichier local (rétrocompat sans champ registre). */

@@ -1,22 +1,36 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('caisse', {
-  version: '1.6.0',
+  version: '0.6.0',
   listAssociations: () =>
     ipcRenderer.invoke('associations:list') as Promise<{
       ok: true
+      /** Profils autorisés par la licence (les autres ne sont pas listés). */
       items: {
         id: string
         displayName: string
         licenseAssociationCode: string | null
-        licenseAllowed: boolean
-        licenseReason: string | null
+        /** Présent si le profil a un logo (data URL, écran d’accueil). */
+        logoDataUrl: string | null
       }[]
       lastSelectedId: string | null
     }>,
-  createAssociation: (payload: { displayName: string; licenseAssociationCode: string }) =>
+  createAssociation: (payload: {
+    displayName: string
+    licenseAssociationCode: string
+    /** Après `code_exists` : envoi d’une demande à l’administrateur (API `notify_admin`). */
+    adminRequest?: boolean
+  }) =>
     ipcRenderer.invoke('associations:create', payload) as Promise<
-      { ok: true; id: string } | { ok: false; error: 'license'; message: string }
+      | { ok: true; id: string }
+      | { ok: true; result: 'admin_notified'; message: string; requestId: number | null }
+      | {
+          ok: false
+          error: 'license' | 'invalid_code' | 'server' | 'activate' | 'code_exists'
+          message: string
+          code?: string
+          serverName?: string
+        }
     >,
   setActiveAssociation: (id: string) =>
     ipcRenderer.invoke('associations:set-active', id) as Promise<
@@ -32,6 +46,13 @@ contextBridge.exposeInMainWorld('caisse', {
           error: 'invalid' | 'wrong_pin' | 'no_pin' | 'not_found'
         }
     >,
+  associationRequestCheck: () =>
+    ipcRenderer.invoke('association-request:check') as Promise<
+      | { show: false }
+      | { show: true; requestId: number; title: string; message: string; status: 'approved' | 'rejected' }
+    >,
+  associationRequestDismiss: (requestId: number) =>
+    ipcRenderer.invoke('association-request:dismiss', requestId) as Promise<{ ok: true } | { ok: false }>,
   getAppPaths: () =>
     ipcRenderer.invoke('app:get-paths') as Promise<{
       userDataRoot: string
@@ -39,14 +60,40 @@ contextBridge.exposeInMainWorld('caisse', {
       appPath: string
       dataFile: string | null
       salesHistoryFile: string | null
+      appVersion: string
     }>,
+  updateCheck: (payload?: { currentVersion?: string }) =>
+    ipcRenderer.invoke('update:check', payload ?? {}) as Promise<
+      | {
+          ok: true
+          update_available: boolean | null
+          version_compare: number | null
+          version_compare_failed: boolean
+          latest: {
+            release_id: number
+            version: string
+            filename: string
+            file_size: number
+            created_at: string
+          } | null
+          download_endpoint: string
+        }
+      | { ok: false; message: string }
+    >,
+  updateDownload: (payload: { releaseId: number; suggestedFilename?: string }) =>
+    ipcRenderer.invoke('update:download', payload) as Promise<
+      | { ok: true; filePath: string }
+      | { ok: false; message: string; cancelled?: boolean }
+    >,
   getLicense: () =>
     ipcRenderer.invoke('license:get') as Promise<{
       hasKey: boolean
       maskedKey: string
       status: 'active' | 'inactive'
       displayStatus: 'inactive' | 'valid' | 'invalid' | 'unconfigured'
-      mode: 'none' | 'long' | 'short'
+      mode: 'none' | 'web'
+      verificationSource?: 'online' | 'offline_grace'
+      offlineGrace?: { lastVerifiedAtMs: number; validUntilMs: number }
       reason?: string
       detail?: string
       payloadSummary?: {
@@ -54,12 +101,44 @@ contextBridge.exposeInMainWorld('caisse', {
         expiresAt: string | null
         associationsLabel: string
       }
-      keysHint?: string
+      webSettings?: {
+        projectCode: string
+        licenseKeyMasked: string
+      }
     }>,
-  setLicense: (key: string) => ipcRenderer.invoke('license:set', key) as Promise<{ ok: true }>,
+  setLicense: (
+    payload:
+      | { web: null }
+      | { web: { licenseKey: string; projectCode?: string } }
+      | { licenseKey: string; projectCode?: string }
+  ) => ipcRenderer.invoke('license:set', payload) as Promise<{ ok: true } | { ok: false; message: string }>,
+  testLicenseApi: (payload: { licenseKey: string; projectCode?: string }) =>
+    ipcRenderer.invoke('license:test-api', payload) as Promise<
+      { ok: true; message: string } | { ok: false; message: string }
+    >,
+  licenseMachineInventory: (payload: { adminPassword: string }) =>
+    ipcRenderer.invoke('license:machine-inventory', payload) as Promise<
+      | {
+          ok: true
+          rows: {
+            licenseKey: string
+            maskedKey: string
+            status: string
+            expiresAt: string | null
+            linkedOnMachine: boolean
+            hasFreeActivationSlots: boolean
+          }[]
+          machineId: string
+        }
+      | { ok: false; message: string; code?: string }
+    >,
   licenseCheckAssociation: () =>
     ipcRenderer.invoke('license:check-association') as Promise<
       { ok: true } | { ok: false; reason: string }
+    >,
+  refreshLicenseData: () =>
+    ipcRenderer.invoke('license:refresh-data') as Promise<
+      { ok: true; message: string } | { ok: false; message: string }
     >,
   getData: () => ipcRenderer.invoke('app:get-data'),
   setData: (data: unknown) => ipcRenderer.invoke('app:set-data', data),
@@ -138,10 +217,19 @@ contextBridge.exposeInMainWorld('caisse', {
     ipcRenderer.invoke('app:logo-data-url', fileName) as Promise<string | null>,
   appendSale: (sale: unknown) => ipcRenderer.invoke('history:append', sale),
   listSales: () => ipcRenderer.invoke('history:list'),
+  syncEventSalesMetadata: (payload: {
+    eventId: string
+    eventName: string
+    eventDate: string
+    eventNotes: string
+  }) =>
+    ipcRenderer.invoke('history:sync-event-metadata', payload) as Promise<{ updated: number }>,
   listPrinters: () =>
     ipcRenderer.invoke('printer:list') as Promise<{ name: string; displayName: string }[]>,
   printTickets: (payload: unknown) =>
     ipcRenderer.invoke('print:tickets', payload) as Promise<{ ok: boolean; error?: string }>,
+  printHoldSlip: (payload: unknown) =>
+    ipcRenderer.invoke('print:hold-slip', payload) as Promise<{ ok: boolean; error?: string }>,
   printSummaryReceipt: (payload: unknown) =>
     ipcRenderer.invoke('print:summary-receipt', payload) as Promise<{ ok: boolean; error?: string }>,
   sendSummaryReceiptEmail: (payload: { sale: unknown; to: string }) =>
@@ -182,11 +270,17 @@ contextBridge.exposeInMainWorld('caisse', {
   remoteCaisseGetMirror: () => ipcRenderer.invoke('remote-caisse:get-mirror'),
   remoteCaissePublishState: (state: unknown) =>
     ipcRenderer.invoke('remote-caisse:publish-state', state) as Promise<{ ok: boolean }>,
-  remoteCaisseSetConfig: (payload: { enabled?: boolean; regenerateToken?: boolean }) =>
+  remoteCaisseSetConfig: (payload: {
+    enabled?: boolean
+    regenerateToken?: boolean
+    tokenRequired?: boolean
+    remoteCaisseRequireToken?: 0 | 1
+  }) =>
     ipcRenderer.invoke('remote-caisse:set-config', payload) as Promise<{
       ok: true
       token: string | null
       enabled: boolean
+      tokenRequired: boolean
     }>,
   onRemoteCaisseStateSync: (cb: (state: unknown) => void) => {
     const fn = (_e: unknown, state: unknown) => cb(state)
@@ -235,6 +329,48 @@ contextBridge.exposeInMainWorld('caisse', {
     ipcRenderer.invoke('backup:apply-import', payload) as Promise<
       { ok: true; reload: boolean } | { ok: false; error: string }
     >,
+  associationSyncCheck: () =>
+    ipcRenderer.invoke('association-sync:check') as Promise<
+      | {
+          ok: true
+          localRevision: number | null
+          check: {
+            has_server_snapshot: boolean
+            server_revision: number | null
+            client_current_revision: number | null
+            needs_download: boolean | null
+            client_is_aligned_with_server: boolean | null
+            file_size: number | null
+            sha256_hex: string | null
+            updated_at: string | null
+            download_endpoint?: string | null
+            hint?: string | null
+          }
+        }
+      | { ok: false; message: string; code?: string }
+    >,
+  associationSyncUpload: (payload: { pin: string }) =>
+    ipcRenderer.invoke('association-sync:upload', payload) as Promise<
+      { ok: true; revision: number; message: string } | { ok: false; message: string; code?: string }
+    >,
+  associationSyncDownloadApply: (payload: { pin: string }) =>
+    ipcRenderer.invoke('association-sync:download-apply', payload) as Promise<
+      { ok: true; revision: number; message: string } | { ok: false; message: string; code?: string }
+    >,
+  associationSyncSetCartGate: (payload: { hasCartLines: boolean; paymentOpen: boolean }) =>
+    ipcRenderer.invoke('association-sync:set-cart-gate', payload) as Promise<{ ok: true }>,
+  associationSyncRestartLoop: () =>
+    ipcRenderer.invoke('association-sync:restart-loop') as Promise<{ ok: true }>,
+  onAssociationAutoSyncStatus: (cb: (payload: { banner: string | null }) => void) => {
+    const fn = (_e: unknown, payload: { banner: string | null }) => cb(payload)
+    ipcRenderer.on('association-sync:auto-status', fn)
+    return () => ipcRenderer.removeListener('association-sync:auto-status', fn)
+  },
+  onAssociationSyncDataApplied: (cb: () => void) => {
+    const fn = () => cb()
+    ipcRenderer.on('association-sync:data-applied', fn)
+    return () => ipcRenderer.removeListener('association-sync:data-applied', fn)
+  },
   saveFileWithDialog: (payload: {
     title?: string
     defaultPath?: string

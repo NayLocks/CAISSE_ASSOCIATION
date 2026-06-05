@@ -124,11 +124,14 @@ function verifyRemote(req: IncomingMessage): AuthOk | AuthFail {
   if (!data.remoteCaisseEnabled) {
     return { ok: false, status: 403, body: JSON.stringify({ error: 'Pilotage tablette désactivé.' }) }
   }
+  if (data.remoteCaisseTokenRequired === false) {
+    return { ok: true }
+  }
   if (!data.remoteCaisseToken) {
     return {
       ok: false,
       status: 403,
-      body: JSON.stringify({ error: 'Aucun jeton — générez-en un depuis la caisse (menu Affichage client).' })
+      body: JSON.stringify({ error: 'Aucun jeton — générez-en un depuis la caisse (menu Accès distant).' })
     }
   }
   const tok = getTokenFromRequest(req)
@@ -195,7 +198,10 @@ function buildBootstrapPayload() {
     mirror,
     sumupConfigured,
     sumupTerminalAuto,
-    smtpReceiptConfigured: isEmailReceiptSmtpReady(data)
+    smtpReceiptConfigured: isEmailReceiptSmtpReady(data),
+    tabletTokenRequired: data.remoteCaisseTokenRequired !== false,
+    cashPaymentUi: data.cashPaymentUi === 'express' ? 'express' : 'detail',
+    discountMotifs: data.discountMotifs
   }
 }
 

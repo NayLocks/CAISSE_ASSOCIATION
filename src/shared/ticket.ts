@@ -8,24 +8,18 @@ export interface TicketUnitPayload {
   eventName: string
   associationName: string
   atIso: string
-  /** Motif remise ligne (affiché sur le ticket unitaire seulement si pertinent — voir `shouldShowDiscountMotifOnUnitTicket`). */
+  /** Motif remise ligne (affiché sur le ticket unitaire si non vide). */
   discountReason?: string
-  /** Remise globale panier (pour affichage sur chaque ticket unitaire si motif bénévole). */
+  /** Remise globale panier (%). Non imprimé sur le ticket unitaire (seul le motif texte l’est). */
   cartDiscountPercent?: number
-  /** Motif remise globale (ex. Bénévole — …). */
+  /** Motif remise globale : affiché seul sur le ticket unitaire, en grand, sans montant ni %. */
   cartDiscountReason?: string
 }
 
-/**
- * Ticket unitaire : n’affiche le motif que s’il contient « bénévole » ou le mot « motif »
- * (évite d’imprimer toutes les remises courtes sur chaque ticket).
- */
+/** Vrai si le motif de ligne doit être imprimé sur le ticket unitaire (= texte non vide). */
 export function shouldShowDiscountMotifOnUnitTicket(reason: string | undefined | null): boolean {
   const t = typeof reason === 'string' ? reason.trim() : ''
-  if (!t) return false
-  const folded = t.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')
-  if (folded.includes('benevole')) return true
-  return /\bmotif\b/i.test(t)
+  return t.length > 0
 }
 
 /** Remise globale avec mention bénévole → à répercuter sur chaque ticket unitaire. */

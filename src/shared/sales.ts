@@ -34,6 +34,10 @@ export interface SaleRecord {
   refundSourceOrderNumber?: number
   eventId: string
   eventName: string
+  /** Date événement (snapshot) ; mise à jour si l’événement est modifié dans l’app. */
+  eventDate?: string
+  /** Notes événement (snapshot) ; idem. */
+  eventNotes?: string
   associationName: string
   lines: SaleLineSnapshot[]
   totalCents: number

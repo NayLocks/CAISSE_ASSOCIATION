@@ -13,6 +13,8 @@ export type ShellViewId =
   | 'remoteCaisse'
   | 'history'
   | 'appearance'
+  | 'discountMotifs'
+  | 'dataBackup'
   | 'settings'
 
 export type ShellNavItem = { id: ShellViewId; label: string; icon: string }
@@ -43,7 +45,7 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
   {
     title: 'Matériel & affichage',
     items: [
-      { id: 'sumup', label: 'SumUp', icon: '💳' },
+      { id: 'sumup', label: 'Encaissement / SumUp', icon: '💳' },
       { id: 'printing', label: 'Impression', icon: '🖨️' },
       { id: 'emailReceipt', label: 'E-mail tickets', icon: '📧' },
       { id: 'clientDisplay', label: 'Écran client', icon: '🖥️' },
@@ -55,7 +57,18 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
     items: [
       { id: 'association', label: 'Association', icon: '🏢' },
       { id: 'appearance', label: 'Apparence', icon: '🎨' },
+      { id: 'discountMotifs', label: 'Motifs de remise', icon: '🏷️' },
+      { id: 'dataBackup', label: 'Sauvegarde', icon: '💾' },
       { id: 'settings', label: 'Paramètres', icon: '⚙️' }
     ]
   }
 ]
+
+/** Identifiants de vues (navigation + fragment d’URL `#…`). */
+export const SHELL_VIEW_IDS: ShellViewId[] = SHELL_NAV_GROUPS.flatMap((g) => g.items.map((i) => i.id))
+
+const SHELL_VIEW_ID_SET = new Set<string>(SHELL_VIEW_IDS)
+
+export function isShellViewId(value: string): value is ShellViewId {
+  return SHELL_VIEW_ID_SET.has(value)
+}

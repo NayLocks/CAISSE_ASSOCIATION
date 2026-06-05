@@ -1,0 +1,137 @@
+/* États vides */
+.empty-state {
+  text-align: center;
+  padding: 2rem 1.25rem;
+  max-width: 26rem;
+  margin: 0 auto;
+  color: var(--muted);
+}
+
+.empty-state--compact {
+  padding: 1.35rem 0.85rem;
+  max-width: none;
+}
+
+.empty-state__icon {
+  font-size: 2.1rem;
+  line-height: 1;
+  margin-bottom: 0.65rem;
+  opacity: 0.92;
+}
+
+.empty-state__title {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.empty-state__desc {
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.empty-state__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+  align-items: center;
+}
+
+.history-empty-cell {
+  padding: 0 !important;
+  vertical-align: middle;
+  border: none !important;
+}
+
+.history-empty-cell .empty-state {
+  margin: 1rem auto 1.25rem;
+}
+
+.articles-empty-wrap {
+  padding: 1rem 0 1.5rem;
+}
+
+/* Hiérarchie barres d’outils (caisse + historique) */
+.caisse-toolbar--tiered {
+  justify-content: space-between;
+  align-items: stretch;
+}
+
+.toolbar-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem 1rem;
+}
+
+.toolbar-cluster--primary {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.toolbar-cluster--secondary {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  padding-left: 1rem;
+  margin-left: auto;
+  border-left: 1px solid var(--border);
+}
+
+@media (max-width: 720px) {
+  .toolbar-cluster--secondary {
+    border-left: none;
+    padding-left: 0;
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+.history-toolbar--tiered {
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.history-toolbar-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem 1rem;
+}
+
+.history-toolbar-cluster--filters {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.history-toolbar-cluster--exports {
+  flex: 0 0 auto;
+  padding-left: 1rem;
+  margin-left: auto;
+  border-left: 1px solid var(--border);
+}
+
+@media (max-width: 900px) {
+  .history-toolbar-cluster--exports {
+    border-left: none;
+    padding-left: 0;
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* Focus clavier visible (sans double anneau sur clic souris) */
+:where(button, a, [role='button'], input, select, textarea):focus {
+  outline: none;
+}
+
+:where(button, a, [role='button'], input, select, textarea):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

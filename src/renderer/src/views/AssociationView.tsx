@@ -1,10 +1,12 @@
 import { useCallback, useState } from 'react'
 import { useAppState } from '@renderer/state/AppStateContext'
-import { useAssociationSession } from '@renderer/state/AssociationSessionContext'
+import { useToast } from '@renderer/state/ToastContext'
+import { normalizeLicenseAssociationCode } from '@shared/associationCode'
+import { DEFAULT_UNIT_TICKET_VALIDITY_FR } from '@shared/catalog'
 
 export default function AssociationView(): JSX.Element {
   const { data, setData, logoHref, refreshData } = useAppState()
-  const { switchAssociation } = useAssociationSession()
+  const { showToast } = useToast()
   const [oldPin, setOldPin] = useState('')
   const [newPin, setNewPin] = useState('')
   const [newPin2, setNewPin2] = useState('')
@@ -60,14 +62,66 @@ export default function AssociationView(): JSX.Element {
     [setData]
   )
 
+  const setUnitTicketValidityNotice = useCallback(
+    (unitTicketValidityNotice: string) => {
+      setData((prev) => ({
+        ...prev,
+        association: { ...prev.association, unitTicketValidityNotice }
+      }))
+    },
+    [setData]
+  )
+
+  const setReceiptLogoWidthPercent = useCallback(
+    (receiptLogoWidthPercent: number) => {
+      setData((prev) => ({
+        ...prev,
+        association: { ...prev.association, receiptLogoWidthPercent }
+      }))
+    },
+    [setData]
+  )
+
+  const setUnitTicketShowLogo = useCallback(
+    (unitTicketShowLogo: boolean) => {
+      setData((prev) => ({
+        ...prev,
+        association: { ...prev.association, unitTicketShowLogo }
+      }))
+    },
+    [setData]
+  )
+
+  const setUnitTicketShowDateTime = useCallback(
+    (unitTicketShowDateTime: boolean) => {
+      setData((prev) => ({
+        ...prev,
+        association: { ...prev.association, unitTicketShowDateTime }
+      }))
+    },
+    [setData]
+  )
+
+  const setUnitTicketShowAssociationName = useCallback(
+    (unitTicketShowAssociationName: boolean) => {
+      setData((prev) => ({
+        ...prev,
+        association: { ...prev.association, unitTicketShowAssociationName }
+      }))
+    },
+    [setData]
+  )
+
   const setLicenseAssociationCode = useCallback(
     (raw: string) => {
-      const t = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
+      const t = raw.toUpperCase().replace(/\s+/g, '').slice(0, 32)
+      if (!/^[A-Z0-9_-]*$/.test(t)) return
+      const norm = normalizeLicenseAssociationCode(t)
       setData((prev) => ({
         ...prev,
         association: {
           ...prev.association,
-          licenseAssociationCode: t.length >= 2 ? t : null
+          licenseAssociationCode: norm
         }
       }))
     },
@@ -107,28 +161,11 @@ export default function AssociationView(): JSX.Element {
     if (!window.confirm(msg2)) return
     await window.caisse.factoryResetAssociation()
     await refreshData()
-    window.alert(
-      'Association réinitialisée. Définissez un nouveau code PIN à l’écran suivant si demandé.'
-    )
-  }, [refreshData])
-
-  const factoryReset = useCallback(async () => {
-    const msg1 =
-      'Première confirmation :\n\n' +
-      'Remettre le logiciel à zéro supprime TOUTES les associations et données locales sur cet ordinateur : caisses, événements, articles, stock, sessions, historique des ventes, paramètres et codes PIN.\n\n' +
-      'Continuer ?'
-    if (!window.confirm(msg1)) return
-    const msg2 =
-      'Seconde confirmation :\n\n' +
-      'Cette action est DÉFINITIVE et ne peut pas être annulée.\n\n' +
-      'Confirmer la remise à zéro ?'
-    if (!window.confirm(msg2)) return
-    await window.caisse.factoryReset()
-    switchAssociation()
-    window.alert(
-      'Remise à zéro effectuée. Aucune association ne subsiste sur ce poste ; créez-en une nouvelle ou importez une sauvegarde depuis l’écran de choix.'
-    )
-  }, [switchAssociation])
+    showToast({
+      variant: 'success',
+      message: 'Association réinitialisée. Définissez un nouveau code PIN à l’écran suivant si demandé.'
+    })
+  }, [refreshData, showToast])
 
   const submitChangePin = useCallback(async () => {
     setPinMsg(null)
@@ -168,26 +205,6 @@ export default function AssociationView(): JSX.Element {
         <p className="page-desc">
           Ces informations apparaissent sur les tickets et le récapitulatif de paiement après encaissement.
         </p>
-
-        <div className="card form-card assoc-switch-card">
-          <h3 className="card-title">Changer d’association</h3>
-          <p className="page-desc" style={{ marginBottom: '0.75rem' }}>
-            Pour travailler sur une autre structure (fichiers de données distincts), quittez cette session et
-            sélectionnez une autre association.
-          </p>
-          <div className="assoc-switch-actions">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={() => {
-                void window.caisse.setClientDisplaySessionOpen(false)
-                switchAssociation()
-              }}
-            >
-              Choisir une autre association…
-            </button>
-          </div>
-        </div>
 
         <div className="form-grid">
           <label className="field">
@@ -259,19 +276,32 @@ export default function AssociationView(): JSX.Element {
             />
           </label>
           <label className="field">
-            <span>Code licence (clés courtes CAISSE_LICENCE)</span>
+            <span>Texte du cadre « validité » (tickets unitaires, une ou plusieurs lignes)</span>
+            <textarea
+              rows={3}
+              value={a.unitTicketValidityNotice ?? ''}
+              onChange={(e) => setUnitTicketValidityNotice(e.target.value)}
+              placeholder={DEFAULT_UNIT_TICKET_VALIDITY_FR}
+              autoComplete="off"
+            />
+            <p className="page-desc" style={{ marginTop: '0.35rem', fontSize: '0.85rem' }}>
+              Laisser vide : aucun cadre n’est imprimé sur le ticket unitaire.
+            </p>
+          </label>
+          <label className="field">
+            <span>Code association (WEB_LICENCES)</span>
             <input
               type="text"
               className="mono"
               value={a.licenseAssociationCode ?? ''}
               onChange={(e) => setLicenseAssociationCode(e.target.value)}
-              placeholder="ex. ABC12 — 2 à 6 caractères, identique à la licence"
+              placeholder="ex. CLUB-2026 — 1 à 32 caractères (A-Z, 0-9, -, _)"
               autoComplete="off"
-              maxLength={6}
+              maxLength={32}
             />
             <p className="page-desc" style={{ marginTop: '0.35rem', fontSize: '0.85rem' }}>
-              Obligatoire si vous utilisez une <strong>clé courte</strong> ; laisser vide pour un{' '}
-              <strong>jeton long</strong> (l’UUID de cette association doit figurer dans le jeton).
+              Identique au code défini sur le serveur de licences pour cette association. Laisser vide si non
+              utilisé.
             </p>
           </label>
           <div className="field field-logo">
@@ -298,6 +328,62 @@ export default function AssociationView(): JSX.Element {
                 </button>
               </div>
             </div>
+            <label className="field" style={{ marginTop: '0.75rem' }}>
+              <span>Largeur du logo sur les tickets (% de la largeur du papier)</span>
+              <input
+                type="number"
+                min={5}
+                max={100}
+                step={1}
+                className="mono"
+                value={a.receiptLogoWidthPercent ?? 100}
+                onChange={(e) => {
+                  const v = e.target.valueAsNumber
+                  if (!Number.isFinite(v)) return
+                  setReceiptLogoWidthPercent(Math.max(5, Math.min(100, Math.round(v))))
+                }}
+                autoComplete="off"
+              />
+            </label>
+            <fieldset
+              className="field"
+              style={{
+                marginTop: '0.75rem',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '0.75rem 1rem'
+              }}
+            >
+              <legend style={{ padding: '0 0.35rem' }}>Ticket unitaire (contenu imprimé)</legend>
+              <p className="page-desc" style={{ margin: '0 0 0.65rem', fontSize: '0.85rem' }}>
+                S’applique aux tickets unitaires (impression HTML ou ESC/POS) et au ticket « panier en
+                attente ». Le récapitulatif de caisse n’est pas modifié.
+              </p>
+              <label className="check-label block-check">
+                <input
+                  type="checkbox"
+                  checked={a.unitTicketShowLogo !== false}
+                  onChange={(e) => setUnitTicketShowLogo(e.target.checked)}
+                />
+                <span>Afficher le logo</span>
+              </label>
+              <label className="check-label block-check">
+                <input
+                  type="checkbox"
+                  checked={a.unitTicketShowDateTime !== false}
+                  onChange={(e) => setUnitTicketShowDateTime(e.target.checked)}
+                />
+                <span>Afficher la date et l’heure en pied</span>
+              </label>
+              <label className="check-label block-check">
+                <input
+                  type="checkbox"
+                  checked={a.unitTicketShowAssociationName !== false}
+                  onChange={(e) => setUnitTicketShowAssociationName(e.target.checked)}
+                />
+                <span>Afficher le nom de l’association en pied</span>
+              </label>
+            </fieldset>
           </div>
         </div>
 
@@ -343,24 +429,6 @@ export default function AssociationView(): JSX.Element {
           </button>
         </div>
 
-        <div className="card form-card">
-          <h3 className="card-title">Autre association</h3>
-          <p className="page-desc factory-reset-desc">
-            Retourner à l’écran de choix pour ouvrir une autre caisse sur cet ordinateur (la session actuelle
-            est fermée).
-          </p>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => {
-              void window.caisse.setClientDisplaySessionOpen(false)
-              switchAssociation()
-            }}
-          >
-            Choisir une autre association…
-          </button>
-        </div>
-
         <div className="card form-card factory-reset-card">
           <h3 className="card-title">Réinitialiser cette association</h3>
           <p className="page-desc factory-reset-desc">
@@ -374,22 +442,6 @@ export default function AssociationView(): JSX.Element {
             onClick={() => void factoryResetAssociationOnly()}
           >
             Réinitialiser cette association…
-          </button>
-        </div>
-
-        <div className="card form-card factory-reset-card">
-          <h3 className="card-title danger-title">Remise à zéro complète</h3>
-          <p className="page-desc factory-reset-desc">
-            Efface <strong>toutes les associations</strong> et leurs données sur cet ordinateur (historique des
-            ventes, articles, événements, PIN, etc.). Après remise à zéro, la liste des associations est vide.
-            Deux boîtes de confirmation successives sont nécessaires.
-          </p>
-          <button
-            type="button"
-            className="btn btn-danger-reset"
-            onClick={() => void factoryReset()}
-          >
-            Remettre tout le logiciel à zéro…
           </button>
         </div>
       </div>

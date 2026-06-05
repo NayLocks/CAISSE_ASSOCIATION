@@ -3,9 +3,11 @@ import { BrowserWindow } from 'electron'
 import { existsSync, readFileSync } from 'fs'
 import { extname } from 'path'
 import type { ProductConfig } from '../shared/catalog'
+import { formatOrderLabel } from '../shared/orderDigits.js'
 import { getStockMap } from '../shared/inventory'
 import type { SaleLineSnapshot, SalePayment, SaleRecord } from '../shared/sales'
 import type { TicketUnitPayload } from '../shared/ticket'
+import { associationAutoSyncUploadAfterSale } from './associationAutoSync.js'
 import { appendSale } from './salesHistory.js'
 import { loadPersistedData, savePersistedData, logoFullPath } from './stateStore.js'
 import type { RemoteCaisseMirror } from '../shared/remoteCaisseMirror.js'
@@ -18,8 +20,9 @@ import {
 import { clearMirrorAfterSale, getRemoteMirror } from './remoteCaisseState.js'
 import { clearTabletPaymentSessionFlags } from './tabletClientDisplaySync.js'
 import { setClientDisplayState } from './clientDisplayServer.js'
-import { printHtmlDocument } from './printWindow.js'
-import { buildTicketsDocument } from './ticketHtml.js'
+import { printUnitTicketsToDevice } from './printWindow.js'
+import { printUnitTicketsEscpos } from './thermalEscpos/index.js'
+import { unitTicketDocumentOptionsFromAssociation } from './cashReceipt/receiptDocuments.js'
 
 function stockAvailable(p: ProductConfig, stock: Record<string, number>): number {
   if (!p.trackStock) return Number.POSITIVE_INFINITY
@@ -158,6 +161,8 @@ export async function executeRemoteSale(payment: SalePayment): Promise<RemoteSal
     orderNumber,
     eventId: ev.id,
     eventName: ev.name,
+    eventDate: ev.date,
+    eventNotes: ev.notes,
     associationName: assocName,
     lines: snapLines.map((l): SaleLineSnapshot => {
       const lineTotalCents = l.unitCents * l.qty
@@ -212,6 +217,7 @@ export async function executeRemoteSale(payment: SalePayment): Promise<RemoteSal
   }
   savePersistedData(nextData)
   appendSale(sale)
+  void associationAutoSyncUploadAfterSale()
   clearMirrorAfterSale()
 
   const logo = readLogoDataUrl(data.association.logoFile)
@@ -238,8 +244,24 @@ export async function executeRemoteSale(payment: SalePayment): Promise<RemoteSal
         })
       }
     }
-    const html = buildTicketsDocument(tickets, logo)
-    await printHtmlDocument(html, data.printing.deviceName, data.printing.silentPrint !== false)
+    const docOpts = unitTicketDocumentOptionsFromAssociation(data.association)
+    if (data.printing.unitTicketEngine === 'escpos_raw') {
+      await printUnitTicketsEscpos(tickets, data.printing.deviceName, {
+        ...docOpts,
+        logoDataUrl: logo,
+        escposPaperWidth: data.printing.escposPaperWidth,
+        escposCutMode: data.printing.escposCutMode,
+        escposCutInverted: data.printing.escposCutInverted
+      })
+    } else {
+      await printUnitTicketsToDevice(
+        tickets,
+        logo,
+        data.printing.deviceName,
+        data.printing.silentPrint !== false,
+        docOpts
+      )
+    }
   }
 
   const fmt = new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(total / 100)
@@ -254,7 +276,7 @@ export async function executeRemoteSale(payment: SalePayment): Promise<RemoteSal
     totalCents: 0,
     thanksTitle: isRefund ? 'Remboursement enregistré' : 'Merci pour votre achat !',
     thanksDetail: fmt,
-    orderNumberLabel: orderNumber > 0 ? `N° ${String(orderNumber).padStart(6, '0')}` : null,
+    orderNumberLabel: orderNumber > 0 ? formatOrderLabel(orderNumber) : null,
     logoDataUrl: logo,
     clientUiTheme: data.clientDisplayTheme ?? 'light'
   })

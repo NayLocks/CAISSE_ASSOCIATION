@@ -1,4 +1,23 @@
-import type { AppPersistedData } from './catalog'
+import type { AppPersistedData, ProductConfig } from './catalog'
+
+/** Article en alerte stock bas (seuil défini et stock ≤ seuil). */
+export function isLowStock(product: ProductConfig, qty: number): boolean {
+  if (!product.trackStock) return false
+  const th = product.lowStockThreshold
+  if (th === null || th === undefined || !Number.isFinite(th)) return false
+  return qty <= Math.max(0, Math.floor(th))
+}
+
+export function listLowStockProducts(
+  products: ProductConfig[],
+  stockMap: Record<string, number>
+): ProductConfig[] {
+  return products.filter((p) => {
+    if (!p.trackStock) return false
+    const qty = stockMap[p.id] ?? 0
+    return isLowStock(p, qty)
+  })
+}
 
 /** Stock disponible pour un événement (articles suivis). */
 export function getStockMap(data: AppPersistedData, eventId: string | null): Record<string, number> {

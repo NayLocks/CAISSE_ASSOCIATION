@@ -2,10 +2,15 @@ import { existsSync, readFileSync } from 'fs'
 import { extname } from 'path'
 import type { TicketUnitPayload } from '../shared/ticket.js'
 import { findSaleByOrderForEvent } from './salesHistory.js'
-import { receiptLegalInfoFromAssociation } from '../shared/catalog.js'
+import { receiptLegalInfoFromAssociation, clampReceiptLogoWidthPercent } from '../shared/catalog.js'
 import { loadPersistedData, logoFullPath } from './stateStore.js'
-import { printHtmlDocument } from './printWindow.js'
-import { buildSummaryReceiptDocument, buildTicketsDocument } from './ticketHtml.js'
+import {
+  printReceiptHtmlPages,
+  buildSummaryReceiptPrintHtmlPages,
+  printUnitTicketsToDevice
+} from './printWindow.js'
+import { printUnitTicketsEscpos } from './thermalEscpos/index.js'
+import { unitTicketDocumentOptionsFromAssociation } from './cashReceipt/receiptDocuments.js'
 
 function logoMime(ext: string): string {
   switch (ext.toLowerCase()) {
@@ -57,9 +62,11 @@ export async function executeRemoteReceiptPrint(opts: {
   const legal = receiptLegalInfoFromAssociation(data.association)
 
   if (opts.kind === 'summary') {
-    const html = buildSummaryReceiptDocument(sale, logo, legal)
-    await printHtmlDocument(html, deviceName, silent)
-    return { ok: true }
+    const pages = buildSummaryReceiptPrintHtmlPages(sale, logo, legal, {
+      logoWidthPercent: clampReceiptLogoWidthPercent(data.association.receiptLogoWidthPercent)
+    })
+    const r = await printReceiptHtmlPages(pages, deviceName, silent)
+    return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'Impression récap impossible.' }
   }
 
   const orderNum = sale.orderNumber != null && sale.orderNumber > 0 ? sale.orderNumber : -1
@@ -89,7 +96,17 @@ export async function executeRemoteReceiptPrint(opts: {
   if (tickets.length === 0) {
     return { ok: false, error: 'Aucune ligne pour cette vente.' }
   }
-  const html = buildTicketsDocument(tickets, logo)
-  await printHtmlDocument(html, deviceName, silent)
-  return { ok: true }
+  const docOpts = unitTicketDocumentOptionsFromAssociation(data.association)
+  if (data.printing.unitTicketEngine === 'escpos_raw') {
+    const r = await printUnitTicketsEscpos(tickets, deviceName, {
+      ...docOpts,
+      logoDataUrl: logo,
+      escposPaperWidth: data.printing.escposPaperWidth,
+      escposCutMode: data.printing.escposCutMode,
+      escposCutInverted: data.printing.escposCutInverted
+    })
+    return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'Impression ESC/POS impossible.' }
+  }
+  const r = await printUnitTicketsToDevice(tickets, logo, deviceName, silent, docOpts)
+  return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'Impression impossible.' }
 }

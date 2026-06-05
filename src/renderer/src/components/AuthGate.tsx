@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { useAppState } from '@renderer/state/AppStateContext'
 import { AuthUiContext } from '@renderer/state/AuthUiContext'
+import { useAssociationSession } from '@renderer/state/AssociationSessionContext'
+import BootLoading from '@renderer/components/BootLoading'
 import PinPanel from '@renderer/components/PinPanel'
 
 export default function AuthGate({ children }: { children: ReactNode }): JSX.Element {
   const { data, loading, refreshData } = useAppState()
+  const { switchAssociation } = useAssociationSession()
   const [sessionOk, setSessionOk] = useState(false)
   const [lockScreen, setLockScreen] = useState(false)
 
@@ -42,11 +45,7 @@ export default function AuthGate({ children }: { children: ReactNode }): JSX.Ele
   }, [loading, sessionOk, lockScreen])
 
   if (loading) {
-    return (
-      <div className="boot-screen">
-        <p>Chargement…</p>
-      </div>
-    )
+    return <BootLoading message="Chargement de la session…" />
   }
 
   const showSetup = !sessionOk && needsSetup
@@ -56,12 +55,19 @@ export default function AuthGate({ children }: { children: ReactNode }): JSX.Ele
     <AuthUiContext.Provider value={{ requestLock }}>
       {/* Pendant le verrouillage, ne pas monter l’UI sous-jacente : focus clavier + saisie PIN fiables */}
       {sessionOk && !lockScreen ? children : null}
-      {showSetup && <PinPanel mode="setup" onSuccess={onSetupDone} />}
+      {showSetup && (
+        <PinPanel
+          mode="setup"
+          onSuccess={onSetupDone}
+          onBack={lockScreen ? undefined : switchAssociation}
+        />
+      )}
       {showLogin && (
         <PinPanel
           mode="login"
           title={lockScreen ? 'Application verrouillée' : undefined}
           onSuccess={onLoginDone}
+          onBack={lockScreen ? undefined : switchAssociation}
         />
       )}
     </AuthUiContext.Provider>

@@ -1,6 +1,6 @@
 {
   "name": "caisse-buvette",
-  "version": "1.0.0",
+  "version": "0.10.0",
   "description": "Caisse enregistreuse pour buvette",
   "author": "Buvette",
   "main": "./out/main/index.js",
@@ -10,11 +10,11 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "dist": "npm run build && electron-builder --win",
-    "dist:portable": "npm run build && electron-builder --win portable"
+    "dist:portable": "npm run build && electron-builder --win portable",
+    "test": "vitest run"
   },
   "dependencies": {
     "@sumup/sdk": "^0.1.4",
-    "caisse-licence": "file:../CAISSE_LICENCE",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",
     "nodemailer": "^8.0.5",
@@ -31,7 +31,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
   },
   "build": {
     "appId": "com.buvette.caisse",
@@ -44,13 +45,8 @@
     "files": [
       "out/**"
     ],
-    "extraResources": [
-      {
-        "from": "../CAISSE_LICENCE/keys/master.secret",
-        "to": "caisse-license/master.secret"
-      }
-    ],
     "win": {
+      "executableName": "caisse-buvette",
       "signAndEditExecutable": false,
       "target": [
         {
@@ -67,7 +63,9 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
+      "uninstallDisplayName": "Caisse - Association - Buvette",
+      "deleteAppDataOnUninstall": false,
       "installerLanguages": [
         "fr_FR",
         "en_US"

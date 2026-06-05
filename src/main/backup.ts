@@ -64,7 +64,8 @@ function collectFilesRecursive(rootDir: string): Record<string, Buffer> {
   return out
 }
 
-function licenseCodeFromBackupFiles(files: Record<string, string>): string | null {
+/** Export pour contrôler que la copie distante correspond au code licence de ce profil. */
+export function licenseCodeFromBackupFiles(files: Record<string, string>): string | null {
   const b64 = files['caisse-data.json']
   if (!b64 || typeof b64 !== 'string') return null
   try {
@@ -93,6 +94,26 @@ function verifyPinOrNoPin(pin: string): boolean {
   if (data.security.pinHash === null) return true
   if (!data.security.pinSalt) return false
   return hashPin(pin, data.security.pinSalt) === data.security.pinHash
+}
+
+/** Vérifie le PIN (ou absence de PIN) pour les opérations sensibles sur l’association active. */
+export function verifyActiveAssociationBackupPin(pin: string): boolean {
+  return verifyPinOrNoPin(pin)
+}
+
+/**
+ * Payload JSON pour l’API `association-sync-upload` : même enveloppe que l’export manuel (.json association).
+ */
+export function buildActiveAssociationSyncPayloadJson():
+  | { ok: true; json: string }
+  | { ok: false; error: 'no_active' | 'not_found' } {
+  const id = getActiveAssociationId()
+  if (!id) return { ok: false, error: 'no_active' }
+  const reg = readRegistry()
+  const item = reg.items.find((x) => x.id === id)
+  if (!item) return { ok: false, error: 'not_found' }
+  const payload = buildPayloadForAssociation(id, item.displayName, 'association')
+  return { ok: true, json: JSON.stringify(payload) }
 }
 
 function buildPayloadForAssociation(
