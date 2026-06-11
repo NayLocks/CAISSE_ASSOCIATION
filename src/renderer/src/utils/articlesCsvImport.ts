@@ -60,7 +60,25 @@ function headerKey(cell: string): string | null {
   if (['categorie', 'category', 'cat'].includes(k)) return 'category'
   if (['emoji', 'icone', 'icon'].includes(k)) return 'emoji'
   if (['stock', 'suivi', 'suivi_stock', 'track', 'track_stock'].includes(k)) return 'track'
+  if (['prix_variable', 'variable', 'variable_price', 'prix_var'].includes(k)) return 'variable'
+  if (
+    ['echange_carte', 'echange', 'card_cash_exchange', 'carte_especes', 'carte_esp'].includes(k)
+  ) {
+    return 'exchange'
+  }
   return null
+}
+
+function parseBoolOuiNon(raw: string, defaultVal: boolean): boolean {
+  const t = raw.trim()
+  if (!t) return defaultVal
+  const n = t
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+  if (['1', 'oui', 'o', 'true', 'yes', 'y'].includes(n)) return true
+  if (['0', 'non', 'n', 'false', 'no'].includes(n)) return false
+  return defaultVal
 }
 
 export function parseArticlesCsv(
@@ -95,7 +113,9 @@ export function parseArticlesCsv(
         price: 1,
         category: 2,
         emoji: 3,
-        track: 4
+        track: 4,
+        variable: 5,
+        exchange: 6
       } as Record<string, number>)
 
   if (!hasHeader && dataLines.length > 0) {
@@ -118,11 +138,25 @@ export function parseArticlesCsv(
       errors.push(`Ligne ${li + (hasHeader ? 2 : 1)} : nom vide.`)
       continue
     }
+    const variablePrice = parseBoolOuiNon(get(line, 'variable'), false)
     const priceRaw = get(line, 'price').replace(/\s/g, '')
-    const cents = parseEurosToCents(priceRaw)
-    if (cents === null || cents < 0) {
-      errors.push(`Ligne ${li + (hasHeader ? 2 : 1)} : prix invalide « ${priceRaw} ».`)
-      continue
+    let cents = 0
+    if (variablePrice) {
+      if (priceRaw) {
+        const parsed = parseEurosToCents(priceRaw)
+        if (parsed === null || parsed < 0) {
+          errors.push(`Ligne ${li + (hasHeader ? 2 : 1)} : prix indicatif invalide « ${priceRaw} ».`)
+          continue
+        }
+        cents = parsed
+      }
+    } else {
+      const parsed = parseEurosToCents(priceRaw)
+      if (parsed === null || parsed < 0) {
+        errors.push(`Ligne ${li + (hasHeader ? 2 : 1)} : prix invalide « ${priceRaw} ».`)
+        continue
+      }
+      cents = parsed
     }
     const catRaw = get(line, 'category')
     const category = resolveCategoryId(catRaw, categories, defaultCategoryId)
@@ -130,6 +164,7 @@ export function parseArticlesCsv(
     const emoji = (emojiRaw || '📦').slice(0, 8)
     const trackRaw = get(line, 'track')
     const trackStock = trackRaw ? parseTrack(trackRaw) : false
+    const cardCashExchange = parseBoolOuiNon(get(line, 'exchange'), false)
     rows.push({
       name,
       priceCents: cents,
@@ -137,7 +172,9 @@ export function parseArticlesCsv(
       emoji,
       imageFile: null,
       trackStock,
-      lowStockThreshold: null
+      lowStockThreshold: null,
+      variablePrice,
+      cardCashExchange
     })
   }
 

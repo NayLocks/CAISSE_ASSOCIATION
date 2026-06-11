@@ -23,6 +23,36 @@ function getFocusSink(): HTMLDivElement {
   return focusSink
 }
 
+/** Champ de formulaire susceptible d’être en cours de saisie. */
+export function isFormFieldFocused(): boolean {
+  const el = document.activeElement
+  if (!(el instanceof HTMLElement)) return false
+  if (el.isContentEditable) return true
+  if (
+    el instanceof HTMLInputElement ||
+    el instanceof HTMLTextAreaElement ||
+    el instanceof HTMLSelectElement
+  ) {
+    return !el.disabled && !(el instanceof HTMLInputElement && el.readOnly)
+  }
+  return false
+}
+
+/** Le focus pointe vers un nœud démonté (modale fermée, ligne supprimée, etc.). */
+export function isFocusDetached(): boolean {
+  const el = document.activeElement
+  return el instanceof HTMLElement && !document.body.contains(el)
+}
+
+/**
+ * Répare un focus « fantôme » après fermeture de modale ou boîte native `confirm()`.
+ * Sans cela, les champs peuvent ne plus recevoir de frappes clavier sous Electron (Windows).
+ */
+export function repairStaleFocus(): void {
+  if (!isFocusDetached()) return
+  stabilizeFocusAfterDelete()
+}
+
 /**
  * Après `confirm()` + `setData` qui supprime la ligne au focus, Chromium / Electron (surtout Windows)
  * peut garder un état de focus incohérent : les champs texte ne reçoivent plus les frappes.
@@ -46,4 +76,9 @@ export function stabilizeFocusAfterDelete(): void {
       window.setTimeout(cycle, 50)
     })
   })
+}
+
+/** À appeler après `window.confirm()` / `window.prompt()`. */
+export function stabilizeFocusAfterNativeDialog(): void {
+  window.setTimeout(() => repairStaleFocus(), 0)
 }

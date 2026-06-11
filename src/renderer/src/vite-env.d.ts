@@ -177,6 +177,7 @@ interface CaisseAPI {
   pickLogo: () => Promise<{ fileName: string; url: string } | null>
   logoUrl: (fileName: string | null) => Promise<string | null>
   getLogoDataUrl: (fileName: string | null) => Promise<string | null>
+  setDataImmediate: (data: AppPersistedData) => Promise<{ ok: true }>
   appendSale: (sale: SaleRecord) => Promise<void>
   listSales: () => Promise<SaleRecord[]>
   syncEventSalesMetadata: (payload: {
@@ -221,7 +222,7 @@ interface CaisseAPI {
     filters: { name: string; extensions: string[] }[]
     dataBase64: string
   }) => Promise<{ ok: true; path: string } | { ok: false; canceled?: boolean }>
-  verifyPin: (pin: string) => Promise<{ ok: boolean }>
+  verifyPin: (pin: string) => Promise<{ ok: boolean; error?: 'admin_network' }>
   setInitialPin: (pin: string) => Promise<
     { ok: true } | { ok: false; error: 'already_set' | 'weak' }
   >
@@ -229,8 +230,8 @@ interface CaisseAPI {
     oldPin: string,
     newPin: string
   ) => Promise<{ ok: true } | { ok: false; error: 'no_pin' | 'wrong_old' | 'weak' }>
-  factoryReset: () => Promise<{ ok: true }>
-  factoryResetAssociation: () => Promise<{ ok: true }>
+  factoryReset: (pin: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  factoryResetAssociation: (pin: string) => Promise<{ ok: true } | { ok: false; message: string }>
   pushClientDisplay: (state: ClientDisplayState) => Promise<{ ok: true }>
   patchClientDisplayTheme: (theme: 'dark' | 'light') => Promise<{ ok: true }>
   getClientDisplayInfo: () => Promise<{ port: number; urls: string[] }>

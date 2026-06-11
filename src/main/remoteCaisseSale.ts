@@ -5,6 +5,7 @@ import { extname } from 'path'
 import type { ProductConfig } from '../shared/catalog'
 import { formatOrderLabel } from '../shared/orderDigits.js'
 import { getStockMap } from '../shared/inventory'
+import { cartIsCardCashExchangeSale } from '../shared/cardCashExchange.js'
 import type { SaleLineSnapshot, SalePayment, SaleRecord } from '../shared/sales'
 import type { TicketUnitPayload } from '../shared/ticket'
 import { associationAutoSyncUploadAfterSale } from './associationAutoSync.js'
@@ -152,6 +153,21 @@ export async function executeRemoteSale(payment: SalePayment): Promise<RemoteSal
   const total = finalUnitCents(subtotal, cartPct)
   if (total < 0) return { ok: false, error: 'Total invalide.' }
 
+  const isExchange = cartIsCardCashExchangeSale(snapLines)
+  if (isExchange) {
+    if (
+      payment.mode !== 'card' ||
+      payment.cashCents !== 0 ||
+      payment.cardCents !== total ||
+      payment.changeCents !== 0
+    ) {
+      return {
+        ok: false,
+        error: 'Échange carte / espèces : paiement intégral par carte uniquement.'
+      }
+    }
+  }
+
   const orderNumber = data.orderCounter + 1
   const assocName = data.association.name.trim() || 'Association'
 
@@ -183,6 +199,7 @@ export async function executeRemoteSale(payment: SalePayment): Promise<RemoteSal
       return snap
     }),
     totalCents: total,
+    ...(isExchange ? { cardCashExchange: true as const } : {}),
     ...(cartPct > 0 ? { cartDiscountPercent: cartPct } : {}),
     ...(typeof m.cartDiscountReason === 'string' && m.cartDiscountReason.trim()
       ? { cartDiscountReason: m.cartDiscountReason.trim().slice(0, 200) }

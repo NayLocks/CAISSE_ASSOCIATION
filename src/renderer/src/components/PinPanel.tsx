@@ -94,6 +94,10 @@ export default function PinPanel({
       if (r.ok) {
         setPin('')
         await onSuccess()
+      } else if (r.error === 'admin_network') {
+        setErr(
+          'Code administrateur serveur : connexion Internet requise pour vérifier le code sur WEB_LICENCES.'
+        )
       } else {
         setErr('Code incorrect.')
       }

@@ -17,6 +17,13 @@ export interface ProductConfig {
   trackStock: boolean
   /** Alerte à la caisse si stock ≤ seuil ; null = pas d’alerte. */
   lowStockThreshold: number | null
+  /** Si true, le prix unitaire est demandé à chaque ajout au panier. */
+  variablePrice?: boolean
+  /**
+   * Si true : article seul dans le panier, paiement carte obligatoire.
+   * Comptabilité : crédit carte + retrait équivalent des espèces en caisse (échange carte / espèces).
+   */
+  cardCashExchange?: boolean
 }
 
 export interface AssociationConfig {

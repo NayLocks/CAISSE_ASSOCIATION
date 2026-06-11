@@ -247,7 +247,16 @@ export default function DataBackupView(): JSX.Element {
       'Cette action est DÉFINITIVE et ne peut pas être annulée.\n\n' +
       'Confirmer la remise à zéro ?'
     if (!window.confirm(msg2)) return
-    await window.caisse.factoryReset()
+    const pin =
+      data.security.pinHash === null
+        ? ''
+        : window.prompt('Saisissez le code PIN pour confirmer la remise à zéro :')
+    if (pin === null) return
+    const r = await window.caisse.factoryReset(pin)
+    if (!r.ok) {
+      showToast({ variant: 'error', message: r.message })
+      return
+    }
     switchAssociation()
     showToast({
       variant: 'success',
@@ -255,7 +264,7 @@ export default function DataBackupView(): JSX.Element {
         'Remise à zéro effectuée. Aucune association ne subsiste sur ce poste ; créez-en une nouvelle ou importez une sauvegarde depuis l’écran de choix.',
       durationMs: 12000
     })
-  }, [switchAssociation, showToast])
+  }, [data.security.pinHash, switchAssociation, showToast])
 
   return (
     <div className="page page-scroll">

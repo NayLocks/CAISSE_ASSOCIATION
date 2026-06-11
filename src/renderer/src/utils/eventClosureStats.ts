@@ -4,6 +4,8 @@ import {
   aggregateProductsForEvent,
   netCashEspècesDelta,
   theoreticalCashInDrawerCents,
+  totalCardCashExchangeCardCents,
+  totalCardCashExchangeCashOutCents,
   totalCardCentsForEvent,
   totalRevenueCentsForEvent
 } from '@renderer/utils/eventSalesStats'
@@ -16,6 +18,8 @@ export type EventClosureStats = {
   cardCents: number
   floatCents: number
   theoreticalCashCents: number
+  cardCashExchangeCardCents: number
+  cardCashExchangeCashOutCents: number
   topProducts: ReturnType<typeof aggregateProductsForEvent>
 }
 
@@ -30,7 +34,10 @@ export function buildEventClosureStats(
   const refundCount = eventSales.filter((s) => s.kind === 'refund').length
   let cashDeltaCents = 0
   for (const s of eventSales) {
-    cashDeltaCents += netCashEspècesDelta(s.payment, s.kind === 'refund' ? 'refund' : 'sale')
+    cashDeltaCents += netCashEspècesDelta(s.payment, {
+      kind: s.kind === 'refund' ? 'refund' : 'sale',
+      cardCashExchange: s.cardCashExchange === true
+    })
   }
   return {
     saleCount,
@@ -40,6 +47,8 @@ export function buildEventClosureStats(
     cardCents: totalCardCentsForEvent(sales, eventId),
     floatCents,
     theoreticalCashCents: theoreticalCashInDrawerCents(floatCents, eventSales),
+    cardCashExchangeCardCents: totalCardCashExchangeCardCents(sales, eventId),
+    cardCashExchangeCashOutCents: totalCardCashExchangeCashOutCents(sales, eventId),
     topProducts: aggregateProductsForEvent(sales, eventId, products)
       .filter((p) => p.qtyNet > 0)
       .sort((a, b) => b.revenueCents - a.revenueCents)

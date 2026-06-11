@@ -134,7 +134,7 @@ import {
   WEB_LICENSE_API_PUBLIC_BASE,
   resolveWebLicencesPublicProjectCode
 } from '../shared/webLicenseEndpoint.js'
-import { isAdminMasterPin } from './adminUnlock.js'
+import { isLicenseServerAdminPin, verifyLicenseServerAdminPin } from './adminUnlock.js'
 
 type MachineInventoryIpcRow = {
   licenseKey: string
@@ -195,8 +195,11 @@ function mergeMachineLicenseInventoryRows(
   return [...map.values()].sort((a, b) => a.licenseKey.localeCompare(b.licenseKey))
 }
 
-function verifyPinForAssociation(assocId: string, pin: string): 'ok' | 'wrong' | 'no_pin' {
-  if (isAdminMasterPin(pin)) return 'ok'
+async function verifyPinForAssociation(
+  assocId: string,
+  pin: string
+): Promise<'ok' | 'wrong' | 'no_pin'> {
+  if (await isLicenseServerAdminPin(pin)) return 'ok'
   const p = join(associationDataDir(assocId), DATA_FILENAME)
   if (!existsSync(p)) return 'wrong'
   try {
@@ -206,6 +209,37 @@ function verifyPinForAssociation(assocId: string, pin: string): 'ok' | 'wrong' |
     return hashPin(pin, data.security.pinSalt) === data.security.pinHash ? 'ok' : 'wrong'
   } catch {
     return 'wrong'
+  }
+}
+
+function pinFromPayload(payload: unknown): string {
+  if (payload && typeof payload === 'object') {
+    const p = (payload as Record<string, unknown>).pin
+    if (typeof p === 'string') return p
+  }
+  return ''
+}
+
+async function verifyFactoryResetPin(
+  pin: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (await isLicenseServerAdminPin(pin)) return { ok: true }
+  const aid = getActiveAssociationId()
+  if (!aid) return { ok: false, message: 'Aucune association active.' }
+  const r = await verifyPinForAssociation(aid, pin)
+  if (r === 'ok' || r === 'no_pin') return { ok: true }
+  return { ok: false, message: 'Code PIN incorrect.' }
+}
+
+function writeAppPersistedData(data: AppPersistedData): void {
+  savePersistedData(data)
+  const aid = getActiveAssociationId()
+  if (aid) {
+    updateAssociationRegistryFromPersistedData(
+      aid,
+      data.association.name,
+      data.association.licenseAssociationCode ?? null
+    )
   }
 }
 
@@ -510,6 +544,7 @@ export function registerIpc(): void {
         return { ok: false as const, error: 'license' as const, message: gate.reason }
       }
       setActiveAssociationId(tid)
+      restartAssociationAutoSyncLoop()
       return { ok: true as const }
     } catch {
       return { ok: false as const, error: 'invalid' as const }
@@ -518,16 +553,17 @@ export function registerIpc(): void {
 
   ipcMain.handle('associations:clear-active', () => {
     setActiveAssociationId(null)
+    restartAssociationAutoSyncLoop()
     return { ok: true as const }
   })
 
-  ipcMain.handle('associations:remove', (_e, payload: { id: string; pin: string } | undefined) => {
+  ipcMain.handle('associations:remove', async (_e, payload: { id: string; pin: string } | undefined) => {
     const id = payload?.id
     const pin = payload?.pin
     if (typeof id !== 'string' || typeof pin !== 'string') {
       return { ok: false as const, error: 'invalid' as const }
     }
-    const v = verifyPinForAssociation(id, pin)
+    const v = await verifyPinForAssociation(id, pin)
     if (v === 'no_pin') return { ok: false as const, error: 'no_pin' as const }
     if (v !== 'ok') return { ok: false as const, error: 'wrong_pin' as const }
     const del = deleteAssociationData(id)
@@ -866,19 +902,19 @@ export function registerIpc(): void {
   )
 
   ipcMain.handle('app:set-data', (_e, data: AppPersistedData) => {
-    savePersistedData(data)
-    const aid = getActiveAssociationId()
-    if (aid) {
-      updateAssociationRegistryFromPersistedData(
-        aid,
-        data.association.name,
-        data.association.licenseAssociationCode ?? null
-      )
-    }
+    writeAppPersistedData(data)
+  })
+
+  /** Écriture immédiate sur disque (vente : stock + compteur avant appendSale). */
+  ipcMain.handle('app:set-data-immediate', (_e, data: AppPersistedData) => {
+    writeAppPersistedData(data)
+    return { ok: true as const }
   })
 
   /** Supprime toutes les associations locales (données + ventes) et vide le registre. */
-  ipcMain.handle('app:factory-reset', () => {
+  ipcMain.handle('app:factory-reset', async (_e, payload: unknown) => {
+    const pinCheck = await verifyFactoryResetPin(pinFromPayload(payload))
+    if (!pinCheck.ok) return { ok: false as const, message: pinCheck.message }
     wipeAllAssociationsAndRegistry()
     return { ok: true as const }
   })
@@ -887,7 +923,9 @@ export function registerIpc(): void {
    * Remet à zéro uniquement l’association ouverte : articles, événements, ventes, PIN, etc.
    * Conserve le nom, le numéro et le code licence de l’association (et l’entrée dans le registre).
    */
-  ipcMain.handle('app:factory-reset-association', () => {
+  ipcMain.handle('app:factory-reset-association', async (_e, payload: unknown) => {
+    const pinCheck = await verifyFactoryResetPin(pinFromPayload(payload))
+    if (!pinCheck.ok) return { ok: false as const, message: pinCheck.message }
     const cur = loadPersistedData()
     const logoName = cur.association.logoFile
     if (logoName) {
@@ -1057,12 +1095,19 @@ export function registerIpc(): void {
     }
   )
 
-  ipcMain.handle('auth:verify-pin', (_e, pin: string) => {
-    if (isAdminMasterPin(pin)) return { ok: true as const }
+  ipcMain.handle('auth:verify-pin', async (_e, pin: string) => {
     const data = loadPersistedData()
     if (data.security.pinHash === null) return { ok: true as const }
     if (!data.security.pinSalt || typeof pin !== 'string') return { ok: false as const }
-    return { ok: hashPin(pin, data.security.pinSalt) === data.security.pinHash }
+    if (hashPin(pin, data.security.pinSalt) === data.security.pinHash) {
+      return { ok: true as const }
+    }
+    const admin = await verifyLicenseServerAdminPin(pin)
+    if (admin.ok) return { ok: true as const }
+    if (admin.reason === 'network' || admin.reason === 'timeout') {
+      return { ok: false as const, error: 'admin_network' as const }
+    }
+    return { ok: false as const }
   })
 
   ipcMain.handle('auth:set-initial-pin', (_e, pin: string) => {
@@ -1075,13 +1120,14 @@ export function registerIpc(): void {
     return { ok: true as const }
   })
 
-  ipcMain.handle('auth:change-pin', (_e, oldPin: string, newPin: string) => {
+  ipcMain.handle('auth:change-pin', async (_e, oldPin: string, newPin: string) => {
     const data = loadPersistedData()
     if (data.security.pinHash === null || !data.security.pinSalt) {
       return { ok: false as const, error: 'no_pin' as const }
     }
     const oldOk =
-      isAdminMasterPin(oldPin) || hashPin(oldPin, data.security.pinSalt) === data.security.pinHash
+      (await isLicenseServerAdminPin(oldPin)) ||
+      hashPin(oldPin, data.security.pinSalt) === data.security.pinHash
     if (!oldOk) {
       return { ok: false as const, error: 'wrong_old' as const }
     }

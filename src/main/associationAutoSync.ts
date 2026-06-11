@@ -1,5 +1,6 @@
 import type { AppPersistedData } from '../shared/catalog.js'
 import { sanitizeAssociationSyncAutoCheckIntervalSec } from '../shared/catalog.js'
+import { getActiveAssociationId } from './associationRegistry.js'
 import { loadPersistedData } from './stateStore.js'
 import {
   associationSyncPerformCheck,
@@ -27,6 +28,9 @@ let cycleRunning = false
 let pendingServerDownload = false
 let loopTimer: ReturnType<typeof setTimeout> | null = null
 
+/** Quand aucune association n’est ouverte (écran de choix), on réessaie sans planter le processus. */
+const NO_ASSOCIATION_RETRY_MS = 60_000
+
 export function resolveAssociationAutoSyncPin(data: AppPersistedData): string | null {
   if (data.security.pinHash === null) return ''
   const p = (data.associationSyncAutoPin ?? '').trim()
@@ -52,6 +56,7 @@ function cartBlocksAutoApply(): boolean {
 }
 
 export async function associationAutoSyncUploadAfterSale(): Promise<void> {
+  if (!getActiveAssociationId()) return
   const data = loadPersistedData()
   if (!data.associationSyncAutoCheckEnabled) return
   const pin = resolveAssociationAutoSyncPin(data)
@@ -66,6 +71,11 @@ export async function runAssociationAutoSyncCycle(): Promise<void> {
   if (cycleRunning) return
   cycleRunning = true
   try {
+    if (!getActiveAssociationId()) {
+      pendingServerDownload = false
+      broadcastAssociationAutoSyncStatus(null)
+      return
+    }
     const data = loadPersistedData()
     if (!data.associationSyncAutoCheckEnabled) {
       pendingServerDownload = false
@@ -128,6 +138,9 @@ export async function runAssociationAutoSyncCycle(): Promise<void> {
     }
 
     broadcastAssociationAutoSyncStatus(null)
+  } catch {
+    pendingServerDownload = false
+    broadcastAssociationAutoSyncStatus(null)
   } finally {
     cycleRunning = false
   }
@@ -135,15 +148,37 @@ export async function runAssociationAutoSyncCycle(): Promise<void> {
 
 function scheduleNextCycle(): void {
   if (loopTimer) clearTimeout(loopTimer)
-  const data = loadPersistedData()
-  if (!data.associationSyncAutoCheckEnabled) {
-    loopTimer = null
+  loopTimer = null
+
+  const queue = (delayMs: number): void => {
+    loopTimer = setTimeout(() => {
+      void runAssociationAutoSyncCycle()
+        .finally(scheduleNextCycle)
+        .catch(() => {
+          /* évite UnhandledPromiseRejection si scheduleNextCycle échoue */
+        })
+    }, delayMs)
+  }
+
+  if (!getActiveAssociationId()) {
+    queue(NO_ASSOCIATION_RETRY_MS)
     return
   }
+
+  let data: AppPersistedData
+  try {
+    data = loadPersistedData()
+  } catch {
+    queue(NO_ASSOCIATION_RETRY_MS)
+    return
+  }
+
+  if (!data.associationSyncAutoCheckEnabled) {
+    return
+  }
+
   const sec = sanitizeAssociationSyncAutoCheckIntervalSec(data.associationSyncAutoCheckIntervalSec)
-  loopTimer = setTimeout(() => {
-    void runAssociationAutoSyncCycle().finally(scheduleNextCycle)
-  }, sec * 1000)
+  queue(sec * 1000)
 }
 
 /** Boucle de synchro auto (vérif. serveur, téléchargement si plus récent). */

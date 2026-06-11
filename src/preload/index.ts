@@ -142,9 +142,16 @@ contextBridge.exposeInMainWorld('caisse', {
     >,
   getData: () => ipcRenderer.invoke('app:get-data'),
   setData: (data: unknown) => ipcRenderer.invoke('app:set-data', data),
-  factoryReset: () => ipcRenderer.invoke('app:factory-reset') as Promise<{ ok: true }>,
-  factoryResetAssociation: () =>
-    ipcRenderer.invoke('app:factory-reset-association') as Promise<{ ok: true }>,
+  setDataImmediate: (data: unknown) =>
+    ipcRenderer.invoke('app:set-data-immediate', data) as Promise<{ ok: true }>,
+  factoryReset: (pin: string) =>
+    ipcRenderer.invoke('app:factory-reset', { pin }) as Promise<
+      { ok: true } | { ok: false; message: string }
+    >,
+  factoryResetAssociation: (pin: string) =>
+    ipcRenderer.invoke('app:factory-reset-association', { pin }) as Promise<
+      { ok: true } | { ok: false; message: string }
+    >,
   openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url) as Promise<{ ok: true }>,
   showAlert: (payload: {
     message: string
@@ -200,7 +207,7 @@ contextBridge.exposeInMainWorld('caisse', {
       { ok: true } | { ok: false; error: string | 'not_configured' }
     >,
   verifyPin: (pin: string) =>
-    ipcRenderer.invoke('auth:verify-pin', pin) as Promise<{ ok: boolean }>,
+    ipcRenderer.invoke('auth:verify-pin', pin) as Promise<{ ok: boolean; error?: 'admin_network' }>,
   setInitialPin: (pin: string) =>
     ipcRenderer.invoke('auth:set-initial-pin', pin) as Promise<
       { ok: true } | { ok: false; error: 'already_set' | 'weak' }

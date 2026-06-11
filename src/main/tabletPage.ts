@@ -353,6 +353,27 @@ function cartLineCount(){
   return n;
 }
 
+function isExchangeProduct(p){ return !!(p&&p.cardCashExchange); }
+function cartIsExchange(){
+  var L=linesFromMirror();
+  return L.length===1&&L[0].q===1&&isExchangeProduct(L[0].p);
+}
+function canAddToCart(candidate){
+  var ps=B.products||[];
+  for(var id in M.quantities){
+    var q=M.quantities[id]||0; if(q<=0) continue;
+    var p=ps.find(function(x){return x.id===id;});
+    if(isExchangeProduct(p)) return {ok:false,msg:'Retirez l’échange carte / espèces avant d’ajouter d’autres articles.'};
+  }
+  if(isExchangeProduct(candidate)){
+    for(var id2 in M.quantities){
+      if(id2!==candidate.id&&(M.quantities[id2]||0)>0) return {ok:false,msg:'Cet article doit être seul dans le panier.'};
+    }
+    if((M.quantities[candidate.id]||0)>=1) return {ok:false,msg:'Un seul échange à la fois.'};
+  }
+  return {ok:true};
+}
+
 function pushClientDisplayPayment(){
   if(!B) return;
   if(!payOpen){
@@ -396,12 +417,31 @@ function setQty(id,qty){
   syncMirror(render);
 }
 
+function promptVariablePrice(p,onOk){
+  var prev=mirrorBaseCents(p.id,p);
+  var def=prev>0?(Math.round(prev)/100).toFixed(2).replace('.',','):'';
+  var s=prompt('Prix unitaire TTC (€) pour « '+p.name+' ». Vide = annuler.',def);
+  if(s===null) return;
+  var t=String(s).replace(/\\s/g,'').replace(',','.');
+  if(t==='') return;
+  var n=Math.round(parseFloat(t)*100);
+  if(!isFinite(n)||n<0){ alert('Montant invalide'); return; }
+  M.priceOverrides[p.id]=n;
+  onOk();
+}
+
 function addProduct(p){
   if(!B.canSell) return;
+  var gate=canAddToCart(p);
+  if(!gate.ok){ alert(gate.msg); return; }
   var cur=M.quantities[p.id]||0;
   var cap=M.refundMaxByProduct&&M.refundMaxByProduct[p.id]!=null?M.refundMaxByProduct[p.id]:null;
   if(M.refundMode&&cap!=null&&cur+1>cap) return;
   if(!M.refundMode&&p.trackStock&&cur+1>stockAvail(p)) return;
+  if(p.variablePrice){
+    promptVariablePrice(p,function(){ M.quantities[p.id]=cur+1; syncMirror(render); });
+    return;
+  }
   M.quantities[p.id]=cur+1;
   syncMirror(render);
 }
@@ -646,7 +686,7 @@ function render(){
       :'<div class="emoji">'+(p.emoji||'🛒')+'</div>';
     return '<button type="button" class="product-card" '+(dis?'disabled':'')+' data-pid="'+p.id+'">'+
       '<span class="stock-badge">'+(p.trackStock?av:'—')+'</span>'+
-      vis+'<div class="name">'+esc(p.name)+'</div><div class="price">'+fmt(p.priceCents)+'</div></button>';
+      vis+'<div class="name">'+esc(p.name)+'</div><div class="price">'+(p.variablePrice?'Prix variable':fmt(p.priceCents))+'</div></button>';
   }).join('');
 
   var linesHtml=L.length?L.map(function(x){
@@ -675,7 +715,8 @@ function render(){
   });
 
   var cdp=mirrorCartDiscPct(), st=subtotalCents();
-  var cartRemiseBlock=!M.refundMode?(
+  var isEx=cartIsExchange();
+  var cartRemiseBlock=!M.refundMode&&!isEx?(
     '<div style="margin-bottom:.45rem;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.45rem">'+
     (cdp>0?'<div style="font-size:.78rem;color:var(--muted);flex:1;min-width:0">Sous-total '+fmt(st)+' · remise '+cdp+' %'+(M.cartDiscountReason&&String(M.cartDiscountReason).trim()?' — '+esc(String(M.cartDiscountReason).trim()):'')+'</div>':'<div></div>')+
     '<button type="button" class="btn-tiny btn-remise-tiny'+(cdp>0?' btn-remise-tiny--active':'')+'" id="btnRemiseTot" '+(L.length===0||!B.canSell?'disabled':'')+'><span class="brt-i">%</span><span>Remise totale</span>'+(cdp>0?'<span class="brt-b">'+cdp+' %</span>':'')+'</button></div>'
@@ -718,6 +759,8 @@ function render(){
     '<div class="actions'+(M.refundMode?' actions-single':' cart-pay-actions')+'">'+
     (M.refundMode?
       '<button type="button" class="btn btn-primary btn-refund" id="btnPayRf" '+(L.length===0||!B.canSell?'disabled':'')+'>Rembourser</button>':
+      isEx?
+      '<button type="button" class="btn btn-primary" id="btnPayCard" '+(L.length===0||!B.canSell?'disabled':'')+'>Payer par carte</button>':
       '<button type="button" class="btn btn-primary" id="btnPayCash" '+(L.length===0||!B.canSell?'disabled':'')+'>Espèces</button>'+
       '<button type="button" class="btn btn-primary" id="btnPayCard" '+(L.length===0||!B.canSell?'disabled':'')+'>Carte</button>')+
     '</div></div></aside></div></div>';
@@ -747,6 +790,14 @@ function render(){
       if(btn.getAttribute('data-clr')){ setQty(id,0); return;}
       var d=parseInt(btn.getAttribute('data-d')||'0',10);
       var cur=M.quantities[id]||0;
+      if(d>0){
+        var pInc=(B.products||[]).find(function(x){return x.id===id;});
+        if(pInc&&pInc.cardCashExchange){ alert('Un seul échange carte / espèces à la fois.'); return; }
+        if(pInc&&pInc.variablePrice){
+          promptVariablePrice(pInc,function(){ setQty(id,cur+d); });
+          return;
+        }
+      }
       setQty(id,cur+d);
     };
   });
@@ -861,8 +912,9 @@ function cancelActiveSumupAnd(done){
 
 function openPayFrom(entry){
   if(cartLineCount()===0||!B.canSell) return;
+  if(cartIsExchange()&&entry!=='card'){ alert('Échange carte / espèces : carte uniquement.'); return; }
   payOpen=true;
-  payStep=M.refundMode?'choose':entry;
+  payStep=cartIsExchange()?'card':(M.refundMode?'choose':entry);
   cashGiven=0; cashDetailExpanded=M.refundMode||!(B&&B.cashPaymentUi==='express'); cardTargetCents=null; sumPhase='idle'; sumErr=''; checkoutId=''; clientTxId=''; flowOnline=false; sumupNextUrl='';
   stopSumPoll();
   var effSum=B&&B.sumupConfigured&&!M.refundMode;

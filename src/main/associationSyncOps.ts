@@ -67,7 +67,7 @@ export async function associationSyncPerformCheck(): Promise<
 export async function associationSyncPerformUpload(
   pin: string
 ): Promise<{ ok: true; revision: number; message: string } | { ok: false; message: string; code?: string }> {
-  if (!verifyActiveAssociationBackupPin(pin)) {
+  if (!(await verifyActiveAssociationBackupPin(pin))) {
     return { ok: false, message: 'Code PIN incorrect.', code: 'wrong_pin' }
   }
   const assoc = requireNormalizedAssociationCode()
@@ -150,7 +150,7 @@ export async function associationSyncPerformUpload(
 export async function associationSyncPerformDownloadApply(
   pin: string
 ): Promise<{ ok: true; revision: number; message: string } | { ok: false; message: string; code?: string }> {
-  if (!verifyActiveAssociationBackupPin(pin)) {
+  if (!(await verifyActiveAssociationBackupPin(pin))) {
     return { ok: false, message: 'Code PIN incorrect.', code: 'wrong_pin' }
   }
   const assoc = requireNormalizedAssociationCode()
@@ -193,7 +193,7 @@ export async function associationSyncPerformDownloadApply(
     }
   }
 
-  const rep = applyAssociationImportReplace(payload, pin)
+  const rep = await applyAssociationImportReplace(payload, pin)
   if (!rep.ok) {
     const err = rep.error
     return {

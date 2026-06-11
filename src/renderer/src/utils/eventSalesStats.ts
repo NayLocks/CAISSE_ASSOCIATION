@@ -1,9 +1,18 @@
 import type { ProductConfig } from '@shared/catalog'
 import type { SalePayment, SaleRecord } from '@shared/sales'
 
-/** Variation d’espèces en caisse pour une opération (hors carte). */
-export function netCashEspècesDelta(payment: SalePayment, kind?: 'sale' | 'refund'): number {
+export type NetCashDeltaOptions = {
+  kind?: 'sale' | 'refund'
+  cardCashExchange?: boolean
+}
+
+/** Variation d’espèces en caisse pour une opération (hors carte classique). */
+export function netCashEspècesDelta(payment: SalePayment, options?: NetCashDeltaOptions): number {
+  const kind = options?.kind ?? 'sale'
   const sign = kind === 'refund' ? -1 : 1
+  if (options?.cardCashExchange) {
+    return -sign * payment.cardCents
+  }
   if (payment.mode === 'card') return 0
   return sign * (payment.cashCents - payment.changeCents)
 }
@@ -15,7 +24,10 @@ export function theoreticalCashInDrawerCents(
 ): number {
   let t = floatCents
   for (const s of salesForEvent) {
-    t += netCashEspècesDelta(s.payment, s.kind === 'refund' ? 'refund' : 'sale')
+    t += netCashEspècesDelta(s.payment, {
+      kind: s.kind === 'refund' ? 'refund' : 'sale',
+      cardCashExchange: s.cardCashExchange === true
+    })
   }
   return t
 }
@@ -24,17 +36,41 @@ export function totalCardCentsForEvent(sales: SaleRecord[], eventId: string): nu
   let t = 0
   for (const s of sales) {
     if (s.eventId !== eventId) continue
+    if (s.cardCashExchange) continue
     const sign = s.kind === 'refund' ? -1 : 1
     t += sign * s.payment.cardCents
   }
   return t
 }
 
-/** Chiffre d’affaires total sur l’événement (espèces + carte + mixte), après remboursements. */
+/** Crédit carte des échanges carte / espèces (hors encaissements carte classiques). */
+export function totalCardCashExchangeCardCents(sales: SaleRecord[], eventId: string): number {
+  let t = 0
+  for (const s of sales) {
+    if (s.eventId !== eventId || !s.cardCashExchange) continue
+    const sign = s.kind === 'refund' ? -1 : 1
+    t += sign * s.payment.cardCents
+  }
+  return t
+}
+
+/** Sortie d’espèces liée aux échanges carte / espèces (retrait du tiroir). */
+export function totalCardCashExchangeCashOutCents(sales: SaleRecord[], eventId: string): number {
+  let t = 0
+  for (const s of sales) {
+    if (s.eventId !== eventId || !s.cardCashExchange) continue
+    const sign = s.kind === 'refund' ? -1 : 1
+    t += sign * s.payment.cardCents
+  }
+  return t
+}
+
+/** Chiffre d’affaires total sur l’événement (hors échanges carte / espèces). */
 export function totalRevenueCentsForEvent(sales: SaleRecord[], eventId: string): number {
   let t = 0
   for (const s of sales) {
     if (s.eventId !== eventId) continue
+    if (s.cardCashExchange) continue
     const sign = s.kind === 'refund' ? -1 : 1
     t += sign * s.totalCents
   }
@@ -71,6 +107,7 @@ export function aggregateProductsForEvent(
 
   for (const s of sales) {
     if (s.eventId !== eventId) continue
+    if (s.cardCashExchange) continue
     const sign = s.kind === 'refund' ? -1 : 1
     for (const line of s.lines) {
       const prev = map.get(line.productId)

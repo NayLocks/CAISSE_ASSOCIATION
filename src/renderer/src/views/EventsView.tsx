@@ -9,7 +9,11 @@ import {
 } from '@renderer/utils/exportSales'
 import { buildEventClosureStats } from '@renderer/utils/eventClosureStats'
 import { buildEventClosurePdfBase64 } from '@renderer/utils/exportEventClosure'
-import { blurActiveElement, stabilizeFocusAfterDelete } from '@renderer/utils/blurActiveElement'
+import {
+  blurActiveElement,
+  stabilizeFocusAfterDelete,
+  stabilizeFocusAfterNativeDialog
+} from '@renderer/utils/blurActiveElement'
 import { centsToEurosInput, formatMoney, parseEurosToCents } from '@renderer/utils/money'
 
 function newId(): string {
@@ -47,7 +51,10 @@ export default function EventsView(): JSX.Element {
 
   const remove = useCallback(
     (id: string) => {
-      if (!confirm('Supprimer cet événement ?')) return
+      if (!confirm('Supprimer cet événement ?')) {
+        stabilizeFocusAfterNativeDialog()
+        return
+      }
       blurActiveElement()
       window.setTimeout(() => {
         setData((prev) => {

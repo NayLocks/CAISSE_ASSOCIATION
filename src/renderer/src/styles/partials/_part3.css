@@ -930,6 +930,24 @@
   color: #fecaca;
 }
 
+.hist-badge-exchange {
+  display: inline-block;
+  max-width: 11rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.25;
+  background: rgba(96, 165, 250, 0.14);
+  border: 1px solid rgba(96, 165, 250, 0.4);
+  color: #bfdbfe;
+}
+
+.hist-detail-exchange span:last-child {
+  color: var(--text-muted, #94a3b8);
+  font-size: 0.92rem;
+}
+
 .hist-row-refund td {
   background: rgba(127, 29, 29, 0.06);
 }

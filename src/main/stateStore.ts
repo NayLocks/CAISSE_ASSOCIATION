@@ -141,7 +141,9 @@ function sanitizeProducts(raw: ProductConfig[]): ProductConfig[] {
       trackStock: Boolean(p.trackStock),
       lowStockThreshold: sanitizeLowStockThreshold(
         (p as { lowStockThreshold?: unknown }).lowStockThreshold
-      )
+      ),
+      variablePrice: Boolean((p as { variablePrice?: unknown }).variablePrice),
+      cardCashExchange: Boolean((p as { cardCashExchange?: unknown }).cardCashExchange)
     })
   }
   return out.length > 0 ? out : defaultPersistedData().products

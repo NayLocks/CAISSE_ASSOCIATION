@@ -19,8 +19,9 @@ import {
   setActiveAssociationId,
   writeRegistry
 } from './associationRegistry.js'
+import { normalizeLicenseAssociationCode } from '../shared/associationCode.js'
 import { validateNewAssociationLicense } from './caisseLicenseVerifier.js'
-import { isAdminMasterPin } from './adminUnlock.js'
+import { isLicenseServerAdminPin } from './adminUnlock.js'
 import { hashPin } from './pinHash.js'
 import { loadPersistedData } from './stateStore.js'
 import type { AppPersistedData } from '../shared/catalog'
@@ -71,9 +72,7 @@ export function licenseCodeFromBackupFiles(files: Record<string, string>): strin
   try {
     const json = JSON.parse(Buffer.from(b64, 'base64').toString('utf-8')) as AppPersistedData
     const raw = json?.association?.licenseAssociationCode
-    if (typeof raw !== 'string' || !raw.trim()) return null
-    const t = raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)
-    return t.length >= 2 ? t : null
+    return normalizeLicenseAssociationCode(raw)
   } catch {
     return null
   }
@@ -88,8 +87,8 @@ function writeFilesFromBase64(targetDir: string, files: Record<string, string>):
   }
 }
 
-function verifyPinOrNoPin(pin: string): boolean {
-  if (isAdminMasterPin(pin)) return true
+async function verifyPinOrNoPin(pin: string): Promise<boolean> {
+  if (await isLicenseServerAdminPin(pin)) return true
   const data = loadPersistedData()
   if (data.security.pinHash === null) return true
   if (!data.security.pinSalt) return false
@@ -97,7 +96,7 @@ function verifyPinOrNoPin(pin: string): boolean {
 }
 
 /** Vérifie le PIN (ou absence de PIN) pour les opérations sensibles sur l’association active. */
-export function verifyActiveAssociationBackupPin(pin: string): boolean {
+export async function verifyActiveAssociationBackupPin(pin: string): Promise<boolean> {
   return verifyPinOrNoPin(pin)
 }
 
@@ -248,8 +247,11 @@ export function parseBackupPayload(raw: string): BackupPayloadV1 | null {
   }
 }
 
-export function applyFullImport(payload: BackupPayloadV1, pin: string): { ok: true } | { ok: false; error: string } {
-  if (!verifyPinOrNoPin(pin)) return { ok: false, error: 'wrong_pin' }
+export async function applyFullImport(
+  payload: BackupPayloadV1,
+  pin: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!(await verifyPinOrNoPin(pin))) return { ok: false, error: 'wrong_pin' }
   if (payload.scope !== 'full') return { ok: false, error: 'not_full_backup' }
   if (payload.associations.length !== payload.registry.items.length) {
     return { ok: false, error: 'registry_mismatch' }
@@ -276,11 +278,11 @@ export function applyFullImport(payload: BackupPayloadV1, pin: string): { ok: tr
   }
 }
 
-export function applyAssociationImportReplace(
+export async function applyAssociationImportReplace(
   payload: BackupPayloadV1,
   pin: string
-): { ok: true } | { ok: false; error: string } {
-  if (!verifyPinOrNoPin(pin)) return { ok: false, error: 'wrong_pin' }
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!(await verifyPinOrNoPin(pin))) return { ok: false, error: 'wrong_pin' }
   const id = getActiveAssociationId()
   if (!id) return { ok: false, error: 'no_active' }
   const one = payload.associations[0]
@@ -302,7 +304,7 @@ export async function applyAssociationImportNew(
   payload: BackupPayloadV1,
   pin: string
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  if (!verifyPinOrNoPin(pin)) return { ok: false, error: 'wrong_pin' }
+  if (!(await verifyPinOrNoPin(pin))) return { ok: false, error: 'wrong_pin' }
   const one = payload.associations[0]
   if (!one) return { ok: false, error: 'empty' }
   const name = one.displayName.trim().slice(0, 120) || 'Association importée'
@@ -339,12 +341,12 @@ export async function importBackupFromFile(
   if (!payload) return { ok: false, error: 'invalid_file' }
 
   if (mode === 'full') {
-    const r = applyFullImport(payload, pin)
+    const r = await applyFullImport(payload, pin)
     if (!r.ok) return r
     return { ok: true, reload: true }
   }
   if (mode === 'replace') {
-    const r = applyAssociationImportReplace(payload, pin)
+    const r = await applyAssociationImportReplace(payload, pin)
     if (!r.ok) return r
     return { ok: true, reload: false }
   }

@@ -46,4 +46,6 @@ export interface SaleRecord {
   cartDiscountPercent?: number
   /** Motif de la remise sur le total. */
   cartDiscountReason?: string
+  /** Échange carte / espèces : crédit carte et sortie d’espèces du tiroir (pas un CA classique). */
+  cardCashExchange?: boolean
 }

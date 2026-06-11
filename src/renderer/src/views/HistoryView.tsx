@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { SaleRecord } from '@shared/sales'
+import {
+  isSaleCardCashExchange,
+  saleCardCashExchangeComptaLabel,
+  saleOperationTypeLabel
+} from '@shared/saleExchangeLabels'
 import type { TicketUnitPayload } from '@shared/ticket'
 import { receiptLegalInfoFromAssociation } from '@shared/catalog'
 import { buildSummaryReceiptPlainText } from '@shared/receiptPlain'
@@ -19,13 +24,18 @@ import { applyHistoryAdvancedFilters } from '@renderer/utils/historySalesFilter'
 function paymentShort(s: SaleRecord): string {
   const p = s.payment
   const pref = s.kind === 'refund' ? 'Remb. ' : ''
-  if (p.mode === 'card') return `${pref}Carte`
-  if (p.mode === 'cash') {
-    return p.changeCents > 0
-      ? `${pref}Esp. · ${s.kind === 'refund' ? 'repris' : 'rendu'} ${formatMoney(p.changeCents)}`
-      : `${pref}Espèces`
+  let base: string
+  if (p.mode === 'card') base = `${pref}Carte`
+  else if (p.mode === 'cash') {
+    base =
+      p.changeCents > 0
+        ? `${pref}Esp. · ${s.kind === 'refund' ? 'repris' : 'rendu'} ${formatMoney(p.changeCents)}`
+        : `${pref}Espèces`
+  } else base = `${pref}Mixte · carte ${formatMoney(p.cardCents)}`
+  if (isSaleCardCashExchange(s)) {
+    return `${base} · ${saleCardCashExchangeComptaLabel(s)}`
   }
-  return `${pref}Mixte · carte ${formatMoney(p.cardCents)}`
+  return base
 }
 
 function paymentDetail(s: SaleRecord): string {
@@ -48,6 +58,9 @@ function paymentDetail(s: SaleRecord): string {
   if (p.cashCents > 0) parts.push(`Espèces : ${formatMoney(p.cashCents)}`)
   if (p.cardCents > 0) parts.push(`Carte : ${formatMoney(p.cardCents)}`)
   if (p.changeCents > 0) parts.push(`${isRef ? 'Reprise' : 'Rendu'} : ${formatMoney(p.changeCents)}`)
+  if (isSaleCardCashExchange(s)) {
+    parts.push(saleCardCashExchangeComptaLabel(s))
+  }
   return parts.join(' · ')
 }
 
@@ -485,7 +498,11 @@ export default function HistoryView(): JSX.Element {
                       {new Date(s.at).toLocaleString('fr-FR')}
                     </td>
                     <td>
-                      {s.kind === 'refund' ? (
+                      {isSaleCardCashExchange(s) ? (
+                        <span className="hist-badge-exchange" title="Crédit carte et débit espèces compensés (hors CA)">
+                          {saleOperationTypeLabel(s)}
+                        </span>
+                      ) : s.kind === 'refund' ? (
                         <span className="hist-badge-refund">Remboursement</span>
                       ) : (
                         <span className="hist-badge-sale">Vente</span>
@@ -547,7 +564,13 @@ export default function HistoryView(): JSX.Element {
         >
           <div className="modal modal-wide hist-detail-modal" onClick={(e) => e.stopPropagation()}>
             <h3 id="hist-detail-title">
-              {detail.kind === 'refund' ? 'Détail du remboursement' : 'Détail de la vente'}
+              {isSaleCardCashExchange(detail)
+                ? detail.kind === 'refund'
+                  ? 'Détail — annulation échange carte / espèces'
+                  : 'Détail — échange carte / espèces'
+                : detail.kind === 'refund'
+                  ? 'Détail du remboursement'
+                  : 'Détail de la vente'}
             </h3>
             <p className="sub mono">
               {detail.orderNumber != null && detail.orderNumber > 0 ? (
@@ -570,6 +593,12 @@ export default function HistoryView(): JSX.Element {
                 <span className="hist-k">Paiement</span>
                 <span>{paymentDetail(detail)}</span>
               </div>
+              {isSaleCardCashExchange(detail) && (
+                <div className="hist-detail-full hist-detail-exchange">
+                  <span className="hist-k">Comptabilité</span>
+                  <span>{saleCardCashExchangeComptaLabel(detail)}</span>
+                </div>
+              )}
               {detail.kind === 'refund' &&
                 (detail.refundSourceOrderNumber != null || detail.refundSourceSaleId) && (
                   <div className="hist-detail-full">

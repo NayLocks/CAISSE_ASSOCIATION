@@ -1,3 +1,5 @@
+import { repairStaleFocus } from '@renderer/utils/blurActiveElement'
+
 /**
  * Après un choix dans un `<select>` natif (surtout avec emojis), Chromium / Electron sous
  * Windows peut laisser une couche qui intercepte les clics. On blur puis on déplace le
@@ -10,5 +12,6 @@ export function blurNativeSelectSoon(selectEl: HTMLSelectElement): void {
       const next = selectEl.closest('.emoji-pick')?.querySelector<HTMLInputElement>('.input-emoji')
       next?.focus()
     }
+    repairStaleFocus()
   }, 50)
 }

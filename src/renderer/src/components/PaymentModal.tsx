@@ -3,6 +3,7 @@ import { useFocusTrap } from '@renderer/hooks/useFocusTrap'
 import type { ClientPaymentDetail } from '@shared/clientDisplay'
 import type { SalePayment } from '@shared/sales'
 import { EUR_DENOMINATIONS } from '@renderer/payment/denominations'
+import { repairStaleFocus } from '@renderer/utils/blurActiveElement'
 import { formatMoney } from '@renderer/utils/money'
 
 type Step = 'choose' | 'cash' | 'card'
@@ -21,6 +22,8 @@ type Props = {
   refundMode?: boolean
   /** À l’ouverture : sauter l’écran de choix et aller directement espèces ou carte (vente uniquement) */
   initialStep?: Step
+  /** Échange carte / espèces : écran carte uniquement (pas d’espèces ni mixte). */
+  cardOnly?: boolean
   /** Affichage client (navigateur) : synchronise le détail du paiement */
   onPaymentDisplayUpdate?: (detail: ClientPaymentDetail | null) => void
   /**
@@ -42,6 +45,7 @@ export default function PaymentModal({
   sumupTerminalAuto = false,
   refundMode = false,
   initialStep = 'choose',
+  cardOnly = false,
   onPaymentDisplayUpdate,
   cashPaymentUi = 'detail'
 }: Props): JSX.Element | null {
@@ -68,8 +72,13 @@ export default function PaymentModal({
 
   useEffect(() => {
     if (!open) return
-    const start: Step =
-      refundMode || initialStep === 'choose' ? 'choose' : initialStep === 'cash' ? 'cash' : 'card'
+    const start: Step = cardOnly
+      ? 'card'
+      : refundMode || initialStep === 'choose'
+        ? 'choose'
+        : initialStep === 'cash'
+          ? 'cash'
+          : 'card'
     setStep(start)
     setCashGiven(0)
     setCardChargeCents(null)
@@ -83,7 +92,7 @@ export default function PaymentModal({
       clearInterval(pollRef.current)
       pollRef.current = null
     }
-  }, [open, totalCents, initialStep, refundMode, cashPaymentUi])
+  }, [open, totalCents, initialStep, refundMode, cashPaymentUi, cardOnly])
 
   useEffect(() => {
     return () => {
@@ -157,10 +166,12 @@ export default function PaymentModal({
     if (cardChargeCents != null) {
       setCardChargeCents(null)
       setStep('cash')
+    } else if (cardOnly) {
+      onClose()
     } else {
       setStep('choose')
     }
-  }, [cancelActiveSumupFromRef, cardChargeCents])
+  }, [cancelActiveSumupFromRef, cardChargeCents, cardOnly, onClose])
 
   const handleBackdropClose = useCallback(async () => {
     if (step === 'card' && effectiveSumup) {
@@ -170,6 +181,7 @@ export default function PaymentModal({
       setSumupErr(null)
     }
     onClose()
+    window.setTimeout(() => repairStaleFocus(), 0)
   }, [step, effectiveSumup, cancelActiveSumupFromRef, onClose])
 
   const startSumup = useCallback(async () => {
@@ -437,6 +449,12 @@ export default function PaymentModal({
 
         {step === 'card' && (
           <div className="pay-card">
+            {cardOnly ? (
+              <p className="sub">
+                Échange carte / espèces : encaissement carte uniquement ; le montant sera retiré des
+                espèces en caisse.
+              </p>
+            ) : null}
             {cardChargeCents != null && (
               <p className="pay-total-line">
                 <span>Déjà reçu en espèces</span>

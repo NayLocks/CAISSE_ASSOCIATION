@@ -4,7 +4,11 @@ import { getStockMap, initProductStockAcrossEvents, removeProductFromAllStock } 
 import { useAppState } from '@renderer/state/AppStateContext'
 import { useToast } from '@renderer/state/ToastContext'
 import { centsToEurosInput, parseEurosToCents } from '@renderer/utils/money'
-import { blurActiveElement, stabilizeFocusAfterDelete } from '@renderer/utils/blurActiveElement'
+import {
+  blurActiveElement,
+  stabilizeFocusAfterDelete,
+  stabilizeFocusAfterNativeDialog
+} from '@renderer/utils/blurActiveElement'
 import { blurNativeSelectSoon } from '@renderer/utils/blurNativeSelect'
 import { EMOJI_CHOICES } from '@renderer/data/emojiChoices'
 import EmptyState from '@renderer/components/EmptyState'
@@ -96,7 +100,9 @@ export default function ArticlesView(): JSX.Element {
       emoji: '📦',
       imageFile: null,
       trackStock: false,
-      lowStockThreshold: null
+      lowStockThreshold: null,
+      variablePrice: false,
+      cardCashExchange: false
     }
     setData((prev) => ({
       ...prev,
@@ -116,7 +122,9 @@ export default function ArticlesView(): JSX.Element {
           emoji: p.emoji,
           imageFile: null,
           trackStock: p.trackStock,
-          lowStockThreshold: p.lowStockThreshold
+          lowStockThreshold: p.lowStockThreshold,
+          variablePrice: p.variablePrice === true,
+          cardCashExchange: p.cardCashExchange === true
         }
         let stockByEvent = prev.stockByEvent
         if (nextP.trackStock) {
@@ -213,7 +221,10 @@ export default function ArticlesView(): JSX.Element {
 
   const removeProduct = useCallback(
     async (id: string) => {
-      if (!confirm('Supprimer cet article ?')) return
+      if (!confirm('Supprimer cet article ?')) {
+        stabilizeFocusAfterNativeDialog()
+        return
+      }
       blurActiveElement()
       const p = data.products.find((x) => x.id === id)
       if (p?.imageFile) await window.caisse.unlinkProductImage(p.imageFile)
@@ -237,9 +248,10 @@ export default function ArticlesView(): JSX.Element {
           <div>
             <h2 className="page-title">Articles</h2>
             <p className="page-desc">
-              Prix, catégorie, <strong>icône article</strong> (liste dédiée aux articles ou saisie libre) et stock
-              optionnel par <strong>événement actif</strong> (sélection dans l’en-tête). Import CSV : en-tête{' '}
-              <span className="mono">nom, prix, categorie, emoji, suivi_stock</span> (séparateur virgule ou point-virgule).
+              Prix fixe ou <strong>prix variable</strong>, option <strong>échange carte / espèces</strong>{' '}
+              (carte seule, seul dans le panier), catégorie, icône et stock par{' '}
+              <strong>événement actif</strong>. CSV :{' '}
+              <span className="mono">nom, prix, categorie, emoji, suivi_stock, prix_variable, echange_carte</span>.
             </p>
           </div>
           <div className="page-head-actions">
@@ -291,6 +303,8 @@ export default function ArticlesView(): JSX.Element {
                 <th>Image</th>
                 <th>Nom</th>
                 <th>Prix (€)</th>
+                <th>Prix variable</th>
+                <th>Échange carte / espèces</th>
                 <th>Catégorie</th>
                 <th>Stock suivi</th>
                 <th>Quantité</th>
@@ -371,17 +385,50 @@ export default function ArticlesView(): JSX.Element {
                       />
                     </td>
                     <td>
-                      <input
-                        type="text"
-                        className="input-inline mono"
-                        inputMode="decimal"
-                        defaultValue={centsToEurosInput(p.priceCents)}
-                        key={`${p.id}-p-${p.priceCents}`}
-                        onBlur={(e) => {
-                          const c = parseEurosToCents(e.target.value)
-                          if (c !== null) updateProduct(p.id, { priceCents: c })
-                        }}
-                      />
+                      {p.variablePrice ? (
+                        <span className="muted" title="Prix demandé à la caisse à chaque ajout">
+                          —
+                        </span>
+                      ) : (
+                        <input
+                          type="text"
+                          className="input-inline mono"
+                          inputMode="decimal"
+                          defaultValue={centsToEurosInput(p.priceCents)}
+                          key={`${p.id}-p-${p.priceCents}`}
+                          onBlur={(e) => {
+                            const c = parseEurosToCents(e.target.value)
+                            if (c !== null) updateProduct(p.id, { priceCents: c })
+                          }}
+                        />
+                      )}
+                    </td>
+                    <td className="td-center">
+                      <label className="check-label">
+                        <input
+                          type="checkbox"
+                          checked={p.variablePrice === true}
+                          onChange={(e) =>
+                            updateProduct(p.id, {
+                              variablePrice: e.target.checked,
+                              ...(e.target.checked ? { priceCents: 0 } : {})
+                            })
+                          }
+                        />
+                        <span>Oui</span>
+                      </label>
+                    </td>
+                    <td className="td-center">
+                      <label className="check-label" title="Paiement carte obligatoire, article seul dans le panier ; sortie d’espèces du tiroir">
+                        <input
+                          type="checkbox"
+                          checked={p.cardCashExchange === true}
+                          onChange={(e) =>
+                            updateProduct(p.id, { cardCashExchange: e.target.checked })
+                          }
+                        />
+                        <span>Oui</span>
+                      </label>
                     </td>
                     <td>
                       <select

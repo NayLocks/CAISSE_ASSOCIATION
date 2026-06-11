@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useFocusTrap } from '@renderer/hooks/useFocusTrap'
 import {
+  type AppPersistedData,
   type ProductConfig,
   sumUpPaymentsReady,
   formatDiscountMotifReason,
@@ -26,7 +27,8 @@ import { buildClientLineDetailLines } from '@shared/clientDisplayLineDetail'
 import { useAppState } from '@renderer/state/AppStateContext'
 import { useShellNav } from '@renderer/state/ShellNavContext'
 import { useToast } from '@renderer/state/ToastContext'
-import { formatMoney, parseEurosToCents } from '@renderer/utils/money'
+import { repairStaleFocus } from '@renderer/utils/blurActiveElement'
+import { centsToEurosInput, formatMoney, parseEurosToCents } from '@renderer/utils/money'
 import {
   heldCartsStorageKey,
   readHeldCartState,
@@ -43,6 +45,7 @@ import {
   validateUniqueShortcuts,
   writeKeyboardShortcuts
 } from '@renderer/utils/keyboardShortcutsStorage'
+import { canAddProductToCart, cartIsCardCashExchangeSale } from '@shared/cardCashExchange'
 import { formatOrderDigits } from '@shared/orderDigits'
 import { formatOrderDisplay } from '@renderer/utils/order'
 import PaymentModal from '@renderer/components/PaymentModal'
@@ -122,6 +125,11 @@ export default function CaisseView(): JSX.Element {
   const [motifCommentError, setMotifCommentError] = useState<string | null>(null)
   /** Modale secondaire : liste des motifs (après « Oui »). */
   const [motifPickerOpen, setMotifPickerOpen] = useState(false)
+  const [variablePriceModal, setVariablePriceModal] = useState<{
+    product: ProductConfig
+    draftEuros: string
+    mode: 'add' | 'increase'
+  } | null>(null)
   const [refundMaxByProduct, setRefundMaxByProduct] = useState<Record<string, number> | null>(null)
   const [refundSourceMeta, setRefundSourceMeta] = useState<{
     saleId: string
@@ -142,6 +150,7 @@ export default function CaisseView(): JSX.Element {
   const remiseOverlayRef = useRef<HTMLDivElement>(null)
   const motifPickerOverlayRef = useRef<HTMLDivElement>(null)
   const benevoleOverlayRef = useRef<HTMLDivElement>(null)
+  const variablePriceOverlayRef = useRef<HTMLDivElement>(null)
 
   const [kbdShortcuts, setKbdShortcuts] = useState(() => readKeyboardShortcuts())
   const [shortcutEditDraft, setShortcutEditDraft] = useState(() => readKeyboardShortcuts())
@@ -160,6 +169,7 @@ export default function CaisseView(): JSX.Element {
   useFocusTrap(remiseOverlayRef, Boolean(remiseModal))
   useFocusTrap(motifPickerOverlayRef, motifPickerOpen && Boolean(remiseModal))
   useFocusTrap(benevoleOverlayRef, Boolean(motifCommentPreset && remiseModal))
+  useFocusTrap(variablePriceOverlayRef, Boolean(variablePriceModal))
 
   const applyingRemoteCart = useRef(false)
   const skipHeldPersist = useRef(true)
@@ -436,6 +446,11 @@ export default function CaisseView(): JSX.Element {
     [subtotalCents, cartDiscountPct]
   )
 
+  const cartIsCardCashExchange = useMemo(
+    () => cartIsCardCashExchangeSale(lines),
+    [lines]
+  )
+
   useEffect(() => {
     void window.caisse.associationSyncSetCartGate({
       hasCartLines: lines.length > 0,
@@ -560,6 +575,33 @@ export default function CaisseView(): JSX.Element {
     [canSell, quantities, stock, refundMode, refundMaxByProduct]
   )
 
+  const promptAddProduct = useCallback(
+    (p: ProductConfig) => {
+      if (!canSell) return
+      const max = stockAvailable(p, stock)
+      const cur = quantities[p.id] ?? 0
+      const cap = refundMaxByProduct?.[p.id]
+      if (refundMode && cap != null && cur + 1 > cap) return
+      if (!refundMode && p.trackStock && cur + 1 > max) return
+      const gate = canAddProductToCart(products, quantities, p)
+      if (!gate.ok) {
+        showToast({ variant: 'warning', message: gate.message })
+        return
+      }
+      if (p.variablePrice) {
+        const prevCents = priceOverrides[p.id] ?? p.priceCents
+        setVariablePriceModal({
+          product: p,
+          draftEuros: prevCents > 0 ? centsToEurosInput(prevCents) : '',
+          mode: 'add'
+        })
+        return
+      }
+      add(p)
+    },
+    [add, canSell, products, quantities, priceOverrides, showToast, stock, refundMode, refundMaxByProduct]
+  )
+
   const setQty = useCallback(
     (id: string, qty: number) => {
       if (!canSell) return
@@ -599,6 +641,49 @@ export default function CaisseView(): JSX.Element {
     [canSell, products, stock, refundMode, refundMaxByProduct]
   )
 
+  const confirmVariablePrice = useCallback(() => {
+    if (!variablePriceModal) return
+    const c = parseEurosToCents(variablePriceModal.draftEuros.replace(/\s/g, ''))
+    if (c === null) {
+      showToast({ variant: 'error', message: 'Saisissez un prix unitaire valide (€).' })
+      return
+    }
+    const p = variablePriceModal.product
+    const mode = variablePriceModal.mode
+    setPriceOverrides((prev) => ({ ...prev, [p.id]: c }))
+    setVariablePriceModal(null)
+    if (mode === 'increase') {
+      setQty(p.id, (quantities[p.id] ?? 0) + 1)
+    } else {
+      add(p)
+    }
+  }, [add, quantities, setQty, showToast, variablePriceModal])
+
+  const increaseLineQty = useCallback(
+    (id: string, curQty: number) => {
+      const product = products.find((p) => p.id === id)
+      if (!product) return
+      if (product.cardCashExchange) {
+        showToast({
+          variant: 'warning',
+          message: 'Un seul échange carte / espèces à la fois (quantité 1).'
+        })
+        return
+      }
+      if (product.variablePrice) {
+        const prevCents = priceOverrides[id] ?? product.priceCents
+        setVariablePriceModal({
+          product,
+          draftEuros: prevCents > 0 ? centsToEurosInput(prevCents) : '',
+          mode: 'increase'
+        })
+        return
+      }
+      setQty(id, curQty + 1)
+    },
+    [priceOverrides, products, setQty, showToast]
+  )
+
   const clearCart = useCallback(() => {
     setQuantities({})
     setPriceOverrides({})
@@ -609,6 +694,7 @@ export default function CaisseView(): JSX.Element {
     setRefundMaxByProduct(null)
     setRefundSourceMeta(null)
     setRemiseModal(null)
+    setVariablePriceModal(null)
   }, [])
 
   const applyMirrorToCart = useCallback((m: RemoteCaisseMirror) => {
@@ -844,6 +930,22 @@ export default function CaisseView(): JSX.Element {
       const total = finalUnitCents(subtotal, cartPctSnap)
       const cartReasonSnap = cartDiscountReason.trim()
       const isRefund = refundMode
+      const isExchange = cartIsCardCashExchangeSale(snapLines)
+
+      if (isExchange) {
+        if (
+          payment.mode !== 'card' ||
+          payment.cashCents !== 0 ||
+          payment.cardCents !== total ||
+          payment.changeCents !== 0
+        ) {
+          showToast({
+            variant: 'error',
+            message: 'Échange carte / espèces : paiement intégral par carte uniquement.'
+          })
+          return
+        }
+      }
 
       const orderNumber = data.orderCounter + 1
 
@@ -866,21 +968,21 @@ export default function CaisseView(): JSX.Element {
       if (isRefund) setRefundMode(false)
       setShowPayment(false)
 
-      setData((prev) => {
-        const eid = prev.selectedEventId
-        if (!eid) return { ...prev, orderCounter: orderNumber }
-        const map = { ...(prev.stockByEvent[eid] ?? {}) }
+      const eid = data.selectedEventId
+      let nextPersisted: AppPersistedData = { ...data, orderCounter: orderNumber }
+      if (eid) {
+        const map = { ...(data.stockByEvent[eid] ?? {}) }
         for (const { product: p, qty } of snapLines) {
           if (!p.trackStock) continue
           const cur = map[p.id] ?? 0
           map[p.id] = isRefund ? cur + qty : Math.max(0, cur - qty)
         }
-        return {
-          ...prev,
-          stockByEvent: { ...prev.stockByEvent, [eid]: map },
-          orderCounter: orderNumber
+        nextPersisted = {
+          ...nextPersisted,
+          stockByEvent: { ...data.stockByEvent, [eid]: map }
         }
-      })
+      }
+      setData(() => nextPersisted)
 
       const assocName = data.association.name.trim() || 'Association'
       const sale: SaleRecord = {
@@ -914,6 +1016,7 @@ export default function CaisseView(): JSX.Element {
         ...(cartPctSnap > 0 ? { cartDiscountPercent: cartPctSnap } : {}),
         ...(cartReasonSnap ? { cartDiscountReason: cartReasonSnap } : {}),
         payment,
+        ...(isExchange ? { cardCashExchange: true as const } : {}),
         ...(isRefund
           ? {
               kind: 'refund' as const,
@@ -929,44 +1032,63 @@ export default function CaisseView(): JSX.Element {
           : {})
       }
 
-      void window.caisse.appendSale(sale).then(async () => {
-        if (!isRefund && data.printing.autoPrintTickets && data.printing.deviceName) {
-          const logo = await window.caisse.getLogoDataUrl(data.association.logoFile)
-          const tickets: TicketUnitPayload[] = []
-          const atIso = sale.at
-          for (const line of snapLines) {
-            for (let i = 0; i < line.qty; i++) {
-              tickets.push({
-                orderNumber,
-                emoji: line.product.emoji,
-                productName: line.product.name,
-                unitPriceCents: line.unitCents,
-                eventName: selectedEvent.name,
-                associationName: data.association.name.trim(),
-                atIso,
-                ...(line.discountReason.trim()
-                  ? { discountReason: line.discountReason.trim() }
-                  : {}),
-                ...(cartPctSnap > 0 ? { cartDiscountPercent: cartPctSnap } : {}),
-                ...(cartReasonSnap ? { cartDiscountReason: cartReasonSnap } : {})
+      void (async () => {
+        try {
+          await window.caisse.setDataImmediate(nextPersisted)
+          await window.caisse.appendSale(sale)
+          if (!isRefund && data.printing.autoPrintTickets && data.printing.deviceName) {
+            const logo = await window.caisse.getLogoDataUrl(data.association.logoFile)
+            const tickets: TicketUnitPayload[] = []
+            const atIso = sale.at
+            for (const line of snapLines) {
+              for (let i = 0; i < line.qty; i++) {
+                tickets.push({
+                  orderNumber,
+                  emoji: line.product.emoji,
+                  productName: line.product.name,
+                  unitPriceCents: line.unitCents,
+                  eventName: selectedEvent.name,
+                  associationName: data.association.name.trim(),
+                  atIso,
+                  ...(line.discountReason.trim()
+                    ? { discountReason: line.discountReason.trim() }
+                    : {}),
+                  ...(cartPctSnap > 0 ? { cartDiscountPercent: cartPctSnap } : {}),
+                  ...(cartReasonSnap ? { cartDiscountReason: cartReasonSnap } : {})
+                })
+              }
+            }
+            const printR = await window.caisse.printTickets({
+              tickets,
+              deviceName: data.printing.deviceName,
+              logoDataUrl: logo,
+              silent: data.printing.silentPrint
+            })
+            if (!printR.ok) {
+              showToast({
+                variant: 'error',
+                message: `Vente enregistrée, mais l’impression a échoué : ${printR.error ?? 'erreur inconnue'}`
               })
             }
           }
-          await window.caisse.printTickets({
-            tickets,
-            deviceName: data.printing.deviceName,
-            logoDataUrl: logo,
-            silent: data.printing.silentPrint
+          setShowSuccess(true)
+        } catch (e) {
+          showToast({
+            variant: 'error',
+            message:
+              e instanceof Error
+                ? `Erreur lors de l’enregistrement de la vente : ${e.message}`
+                : 'Erreur lors de l’enregistrement de la vente.'
           })
         }
-        setShowSuccess(true)
-      })
+      })()
     },
     [
       data,
       selectedEvent,
       lines,
       setData,
+      showToast,
       refundMode,
       refundSourceMeta,
       cartDiscountPct,
@@ -1238,7 +1360,7 @@ export default function CaisseView(): JSX.Element {
                     type="button"
                     className={`product-card${disabled ? ' disabled' : ''}${low ? ' stock-low' : ''}`}
                     disabled={disabled}
-                    onClick={() => add(p)}
+                    onClick={() => promptAddProduct(p)}
                     title={
                       disabled
                         ? refundMode
@@ -1263,7 +1385,9 @@ export default function CaisseView(): JSX.Element {
                       <div className="emoji">{p.emoji}</div>
                     )}
                     <div className="name">{p.name}</div>
-                    <div className="price">{formatMoney(p.priceCents)}</div>
+                    <div className={`price${p.variablePrice ? ' price-variable' : ''}`}>
+                      {p.variablePrice ? 'Prix variable' : formatMoney(p.priceCents)}
+                    </div>
                     {p.trackStock && (
                       <div className="stock-hint" aria-hidden>
                         Stock {avail}
@@ -1454,7 +1578,7 @@ export default function CaisseView(): JSX.Element {
                             type="button"
                             className="qbtn"
                             aria-label="Augmenter"
-                            onClick={() => setQty(p.id, qty + 1)}
+                            onClick={() => increaseLineQty(p.id, qty)}
                             disabled={
                               !canSell ||
                               atCap ||
@@ -1474,7 +1598,7 @@ export default function CaisseView(): JSX.Element {
                           </button>
                         </div>
                       </div>
-                      {!refundMode ? (
+                      {!refundMode && !p.cardCashExchange ? (
                         <div className="line-inline-tools">
                           <label className="line-pu-field">
                             <span className="line-pu-field__lbl">PU TTC €</span>
@@ -1563,7 +1687,7 @@ export default function CaisseView(): JSX.Element {
             )}
           </div>
           <div className="cart-footer">
-            {lines.length > 0 ? (
+            {lines.length > 0 && !cartIsCardCashExchange ? (
               <div className="cart-global-remise">
                 <div className="cart-global-remise__meta">
                   {cartDiscountPct > 0 ? (
@@ -1607,15 +1731,29 @@ export default function CaisseView(): JSX.Element {
               <span className="label">{refundMode ? 'Total à rembourser' : 'Total'}</span>
               <span className="amount">{formatMoney(totalCents)}</span>
             </div>
-            <div className={`actions${refundMode ? ' actions-single' : ' cart-pay-actions'}`}>
+            {cartIsCardCashExchange ? (
+              <p className="sub cart-exchange-hint" role="status">
+                Échange carte / espèces : paiement par carte uniquement (sortie d’espèces du tiroir).
+              </p>
+            ) : null}
+            <div className={`actions${refundMode || cartIsCardCashExchange ? ' actions-single' : ' cart-pay-actions'}`}>
               {refundMode ? (
                 <button
                   type="button"
                   className="btn btn-primary btn-refund"
                   disabled={lines.length === 0 || !data.selectedEventId || !canSell}
-                  onClick={openPaymentChoose}
+                  onClick={cartIsCardCashExchange ? openPaymentCard : openPaymentChoose}
                 >
                   Rembourser
+                </button>
+              ) : cartIsCardCashExchange ? (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={lines.length === 0 || !data.selectedEventId || !canSell}
+                  onClick={openPaymentCard}
+                >
+                  Payer par carte
                 </button>
               ) : (
                 <>
@@ -1678,6 +1816,64 @@ export default function CaisseView(): JSX.Element {
         </div>
       )}
 
+      {variablePriceModal ? (
+        <div
+          ref={variablePriceOverlayRef}
+          className="overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="variable-price-title"
+          onClick={() => {
+            setVariablePriceModal(null)
+            repairStaleFocus()
+          }}
+        >
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 id="variable-price-title">Prix unitaire</h3>
+            <p className="sub">
+              {variablePriceModal.product.emoji} {variablePriceModal.product.name} — saisissez le
+              montant TTC pour{' '}
+              {variablePriceModal.mode === 'increase' ? 'cette unité supplémentaire' : 'cet article'}.
+            </p>
+            <label className="field">
+              <span>Prix unitaire (€)</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                className="mono"
+                autoFocus
+                placeholder="ex. 5,00"
+                value={variablePriceModal.draftEuros}
+                onChange={(e) =>
+                  setVariablePriceModal((m) => (m ? { ...m, draftEuros: e.target.value } : m))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    confirmVariablePrice()
+                  }
+                }}
+              />
+            </label>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => {
+                  setVariablePriceModal(null)
+                  repairStaleFocus()
+                }}
+              >
+                Annuler
+              </button>
+              <button type="button" className="btn btn-primary" onClick={confirmVariablePrice}>
+                Valider
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {remiseModal ? (
         <div
           ref={remiseOverlayRef}
@@ -1691,6 +1887,7 @@ export default function CaisseView(): JSX.Element {
             setMotifCommentError(null)
             setMotifPickerOpen(false)
             setRemiseModal(null)
+            repairStaleFocus()
           }}
         >
           <div className="modal discount-menu-modal" onClick={(e) => e.stopPropagation()}>
@@ -2084,12 +2281,16 @@ export default function CaisseView(): JSX.Element {
       <PaymentModal
         open={showPayment}
         totalCents={totalCents}
-        onClose={() => setShowPayment(false)}
+        onClose={() => {
+          setShowPayment(false)
+          repairStaleFocus()
+        }}
         onPaid={finalizeSale}
         sumupConfigured={sumupConfigured}
         sumupTerminalAuto={sumupTerminalAuto}
         refundMode={refundMode}
         initialStep={paymentModalInitial}
+        cardOnly={cartIsCardCashExchange}
         onPaymentDisplayUpdate={onPaymentDisplayUpdate}
         cashPaymentUi={data.cashPaymentUi === 'express' ? 'express' : 'detail'}
       />
@@ -2100,7 +2301,10 @@ export default function CaisseView(): JSX.Element {
           role="dialog"
           aria-modal="true"
           aria-labelledby="modal-title"
-          onClick={() => setShowSuccess(false)}
+          onClick={() => {
+            setShowSuccess(false)
+            repairStaleFocus()
+          }}
         >
           <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
             <div className="receipt-brand">
@@ -2164,7 +2368,14 @@ export default function CaisseView(): JSX.Element {
               <div className="big">Total : {formatMoney(lastTotalCents)}</div>
             </div>
             <div className="modal-actions">
-              <button type="button" className="btn btn-primary" onClick={() => setShowSuccess(false)}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  setShowSuccess(false)
+                  repairStaleFocus()
+                }}
+              >
                 Continuer
               </button>
             </div>
@@ -2178,7 +2389,10 @@ export default function CaisseView(): JSX.Element {
           role="dialog"
           aria-modal="true"
           aria-labelledby="caisse-shortcuts-title"
-          onClick={() => setShortcutsOpen(false)}
+          onClick={() => {
+            setShortcutsOpen(false)
+            repairStaleFocus()
+          }}
         >
           <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
             <h3 id="caisse-shortcuts-title">Raccourcis clavier</h3>

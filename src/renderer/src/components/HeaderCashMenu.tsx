@@ -5,6 +5,8 @@ import { formatMoney } from '@renderer/utils/money'
 import {
   aggregateProductsForEvent,
   theoreticalCashInDrawerCents,
+  totalCardCashExchangeCardCents,
+  totalCardCashExchangeCashOutCents,
   totalCardCentsForEvent,
   totalRevenueCentsForEvent
 } from '@renderer/utils/eventSalesStats'
@@ -93,6 +95,16 @@ export default function HeaderCashMenu({
     [sales, selectedEventId]
   )
 
+  const exchangeCardCents = useMemo(
+    () => (selectedEventId ? totalCardCashExchangeCardCents(sales, selectedEventId) : 0),
+    [sales, selectedEventId]
+  )
+
+  const exchangeCashOutCents = useMemo(
+    () => (selectedEventId ? totalCardCashExchangeCashOutCents(sales, selectedEventId) : 0),
+    [sales, selectedEventId]
+  )
+
   const ventesTotalCents = useMemo(
     () => (selectedEventId ? totalRevenueCentsForEvent(sales, selectedEventId) : 0),
     [sales, selectedEventId]
@@ -166,6 +178,18 @@ export default function HeaderCashMenu({
               <dt>Encaissements carte (info)</dt>
               <dd>{formatMoney(cardTotal)}</dd>
             </div>
+            {exchangeCardCents !== 0 ? (
+              <>
+                <div>
+                  <dt>Échanges — crédit carte</dt>
+                  <dd>{formatMoney(exchangeCardCents)}</dd>
+                </div>
+                <div>
+                  <dt>Échanges — sortie espèces</dt>
+                  <dd>{formatMoney(-exchangeCashOutCents)}</dd>
+                </div>
+              </>
+            ) : null}
             <div className="header-cash-highlight">
               <dt>Total espèces estimées</dt>
               <dd>{cashDrawer != null ? formatMoney(cashDrawer) : '—'}</dd>

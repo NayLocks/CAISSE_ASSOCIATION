@@ -9,6 +9,8 @@ import {
   type ReactNode
 } from 'react'
 import BootLoading from '@renderer/components/BootLoading'
+import { useGlobalFocusRepair, isFormFieldFocused } from '@renderer/hooks/useGlobalFocusRepair'
+import { repairStaleFocus } from '@renderer/utils/blurActiveElement'
 import type { AppPersistedData } from '@shared/catalog'
 
 type AppStateContextValue = {
@@ -27,6 +29,10 @@ export function AppStateProvider({ children }: { children: ReactNode }): JSX.Ele
   const [loading, setLoading] = useState(true)
   const [logoHref, setLogoHref] = useState<string | null>(null)
   const skipSave = useRef(true)
+  const refreshPendingRef = useRef(false)
+  const refreshFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useGlobalFocusRepair()
 
   useEffect(() => {
     void window.caisse.getData().then((d) => {
@@ -71,9 +77,35 @@ export function AppStateProvider({ children }: { children: ReactNode }): JSX.Ele
   }, [])
 
   const refreshData = useCallback(async () => {
-    const d = await window.caisse.getData()
-    setDataState(d)
+    const apply = async (): Promise<void> => {
+      if (isFormFieldFocused()) {
+        refreshPendingRef.current = true
+        return
+      }
+      refreshPendingRef.current = false
+      const d = await window.caisse.getData()
+      setDataState(d)
+      repairStaleFocus()
+    }
+    await apply()
   }, [])
+
+  useEffect(() => {
+    const flushPendingRefresh = (): void => {
+      if (!refreshPendingRef.current || isFormFieldFocused()) return
+      if (refreshFlushTimerRef.current) clearTimeout(refreshFlushTimerRef.current)
+      refreshFlushTimerRef.current = setTimeout(() => {
+        refreshFlushTimerRef.current = null
+        void refreshData()
+      }, 120)
+    }
+
+    document.addEventListener('focusout', flushPendingRefresh, true)
+    return () => {
+      document.removeEventListener('focusout', flushPendingRefresh, true)
+      if (refreshFlushTimerRef.current) clearTimeout(refreshFlushTimerRef.current)
+    }
+  }, [refreshData])
 
   useEffect(() => {
     const off = window.caisse.onRemoteCaisseRefreshData(() => {

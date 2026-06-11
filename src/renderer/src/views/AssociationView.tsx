@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 import { useAppState } from '@renderer/state/AppStateContext'
 import { useToast } from '@renderer/state/ToastContext'
+import { stabilizeFocusAfterNativeDialog } from '@renderer/utils/blurActiveElement'
 import { normalizeLicenseAssociationCode } from '@shared/associationCode'
 import { DEFAULT_UNIT_TICKET_VALIDITY_FR } from '@shared/catalog'
 
@@ -153,19 +154,37 @@ export default function AssociationView(): JSX.Element {
       'Seront conservés : le nom, le numéro et le code licence de l’association. Les autres associations ' +
       'sur cet ordinateur ne sont pas touchées.\n\n' +
       'Continuer ?'
-    if (!window.confirm(msg1)) return
+    if (!window.confirm(msg1)) {
+      stabilizeFocusAfterNativeDialog()
+      return
+    }
     const msg2 =
       'Confirmation finale :\n\n' +
       'Cette opération est irréversible pour cette association.\n\n' +
       'Confirmer ?'
-    if (!window.confirm(msg2)) return
-    await window.caisse.factoryResetAssociation()
+    if (!window.confirm(msg2)) {
+      stabilizeFocusAfterNativeDialog()
+      return
+    }
+    const pin =
+      data.security.pinHash === null
+        ? ''
+        : window.prompt('Saisissez le code PIN pour confirmer la réinitialisation :')
+    if (pin === null) {
+      stabilizeFocusAfterNativeDialog()
+      return
+    }
+    const r = await window.caisse.factoryResetAssociation(pin)
+    if (!r.ok) {
+      showToast({ variant: 'error', message: r.message })
+      return
+    }
     await refreshData()
     showToast({
       variant: 'success',
       message: 'Association réinitialisée. Définissez un nouveau code PIN à l’écran suivant si demandé.'
     })
-  }, [refreshData, showToast])
+  }, [data.security.pinHash, refreshData, showToast])
 
   const submitChangePin = useCallback(async () => {
     setPinMsg(null)

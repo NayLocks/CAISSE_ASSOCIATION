@@ -224,6 +224,41 @@ export async function webLicenseFetchMachineInventory(
   }
 }
 
+export type WebLicenseAdminPasswordVerifyResult =
+  | { ok: true }
+  | { ok: false; reason: 'wrong' | 'network' | 'timeout' }
+
+/**
+ * Vérifie le code administrateur WEB_LICENCES (même secret que purge / inventaire licences).
+ * Appel léger via machine-license-inventory.php sans lister les licences.
+ */
+export async function webLicenseVerifyAdminPassword(
+  args: {
+    apiBaseUrl: string
+    projectCode: string
+    adminPassword: string
+    machineId: string
+  },
+  timeoutMs = 8_000
+): Promise<WebLicenseAdminPasswordVerifyResult> {
+  const inv = await webLicenseFetchMachineInventory(
+    {
+      apiBaseUrl: args.apiBaseUrl,
+      projectCode: args.projectCode,
+      adminPassword: args.adminPassword,
+      machineId: args.machineId,
+      includeAvailable: false,
+      includeUsed: false
+    },
+    timeoutMs
+  )
+  if (inv.ok) return { ok: true }
+  const err = String(inv.error ?? '').toLowerCase()
+  if (err === 'network') return { ok: false, reason: 'network' }
+  if (err === 'timeout') return { ok: false, reason: 'timeout' }
+  return { ok: false, reason: 'wrong' }
+}
+
 export type WebLicenseAssociationCodeLookupOk = {
   ok: true
   /** Fiche `association_records` existante pour ce logiciel. */

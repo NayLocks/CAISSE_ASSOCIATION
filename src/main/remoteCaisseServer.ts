@@ -183,6 +183,8 @@ function buildBootstrapPayload() {
         category: p.category,
         emoji: p.emoji,
         trackStock: p.trackStock,
+        variablePrice: p.variablePrice === true,
+        cardCashExchange: p.cardCashExchange === true,
         hasImage: Boolean(imgPath && existsSync(imgPath))
       }
     }),

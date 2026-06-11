@@ -46,6 +46,22 @@ export function buildEventClosurePdfBase64(
     ['Fond de caisse initial', euros(stats.floatCents)],
     ['Variation espèces (ventes)', euros(stats.cashDeltaCents)],
     ['Encaissements carte (net)', euros(stats.cardCents)],
+    ...(stats.cardCashExchangeCardCents !== 0
+      ? [
+          [
+            'Échanges carte / espèces — crédit carte',
+            euros(stats.cardCashExchangeCardCents)
+          ],
+          [
+            'Échanges carte / espèces — débit espèces',
+            euros(-stats.cardCashExchangeCashOutCents)
+          ],
+          [
+            'Note échanges',
+            'Crédit carte et débit espèces de même montant : hors CA, compensation dans les stats.'
+          ]
+        ]
+      : []),
     ['Espèces théoriques en caisse', euros(stats.theoreticalCashCents)]
   ]
 
