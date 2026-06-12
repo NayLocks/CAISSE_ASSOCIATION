@@ -23,6 +23,7 @@ import {
   sanitizeDiscountMotifs
 } from '../shared/catalog'
 import { normalizeLicenseAssociationCode } from '../shared/associationCode.js'
+import { bumpRemoteStateRev } from './remoteCaisseState.js'
 
 const FILE = 'caisse-data.json'
 
@@ -241,6 +242,28 @@ function sanitizeStockByEvent(
   return out
 }
 
+function sanitizeDisabledProductsByEvent(
+  raw: unknown,
+  eventIds: string[]
+): Record<string, Record<string, true>> {
+  const out: Record<string, Record<string, true>> = {}
+  for (const id of eventIds) {
+    out[id] = {}
+  }
+  if (!raw || typeof raw !== 'object') return out
+  const o = raw as Record<string, unknown>
+  for (const eid of eventIds) {
+    const m = o[eid]
+    if (!m || typeof m !== 'object' || m === null) continue
+    const mm: Record<string, true> = {}
+    for (const [k, v] of Object.entries(m as Record<string, unknown>)) {
+      if (v === true) mm[k] = true
+    }
+    out[eid] = mm
+  }
+  return out
+}
+
 function sanitizeEventSessions(raw: unknown): Record<string, EventSessionInfo> {
   if (!raw || typeof raw !== 'object') return {}
   const out: Record<string, EventSessionInfo> = {}
@@ -298,6 +321,7 @@ function mergeWithDefaults(raw: unknown): AppPersistedData {
   const legacyStock =
     typeof o.stock === 'object' && o.stock !== null ? (o.stock as Record<string, number>) : {}
   const stockByEvent = sanitizeStockByEvent(o.stockByEvent, eventIds, legacyStock)
+  const disabledProductsByEvent = sanitizeDisabledProductsByEvent(o.disabledProductsByEvent, eventIds)
   const eventSessions = sanitizeEventSessions(o.eventSessions)
   const security = sanitizeSecurity(o.security, base.security)
   const integrations = sanitizeIntegrations(o.integrations, base.integrations)
@@ -366,6 +390,7 @@ function mergeWithDefaults(raw: unknown): AppPersistedData {
     products,
     integrations,
     stockByEvent,
+    disabledProductsByEvent,
     eventSessions,
     selectedEventId:
       typeof o.selectedEventId === 'string' || o.selectedEventId === null
@@ -393,7 +418,11 @@ function mergeWithDefaults(raw: unknown): AppPersistedData {
     remoteCaisseTokenRequired:
       typeof o.remoteCaisseTokenRequired === 'boolean'
         ? o.remoteCaisseTokenRequired
-        : base.remoteCaisseTokenRequired,
+        : o.remoteCaisseTokenRequired === 0 || o.remoteCaisseTokenRequired === '0'
+          ? false
+          : o.remoteCaisseTokenRequired === 1 || o.remoteCaisseTokenRequired === '1'
+            ? true
+            : base.remoteCaisseTokenRequired,
     remoteCaisseToken:
       o.remoteCaisseToken === null || o.remoteCaisseToken === undefined
         ? base.remoteCaisseToken
@@ -449,6 +478,8 @@ export function loadPersistedData(): AppPersistedData {
 export function savePersistedData(data: AppPersistedData): void {
   const path = dataPath()
   writeFileSync(path, JSON.stringify(data, null, 2), 'utf-8')
+  /** Toute écriture (vente PC, stock, événement…) doit déclencher un refresh tablette. */
+  bumpRemoteStateRev()
 }
 
 export function userDataDir(): string {

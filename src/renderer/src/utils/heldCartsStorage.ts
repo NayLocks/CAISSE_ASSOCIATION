@@ -1,23 +1,12 @@
 import type { AssociationConfig } from '@shared/catalog'
-import type { RemoteCaisseMirror } from '@shared/remoteCaisseMirror'
+import type { HeldCartPersistedState, StoredHeldCart } from '@shared/heldCarts'
+import { MAX_HELD_CARTS } from '@shared/heldCarts'
+
+export type { StoredHeldCart, HeldCartPersistedState }
+export { MAX_HELD_CARTS }
 
 const PREFIX = 'caisse-held-carts-v1:'
 const FILE_VERSION = 2 as const
-
-export type StoredHeldCart = {
-  id: string
-  displayName: string
-  totalCents: number
-  lineCount: number
-  savedAt: number
-  mirror: RemoteCaisseMirror
-}
-
-export type HeldCartPersistedState = {
-  entries: StoredHeldCart[]
-  /** Prochain numéro pour le libellé « Ticket NNN » (incrémenté après chaque mise en attente). */
-  nextHoldTicketNum: number
-}
 
 type StoredFileV2 = { v: typeof FILE_VERSION; nextHoldTicketNum: number; entries: StoredHeldCart[] }
 type StoredFileV1 = { v: 1; entries: StoredHeldCart[] }
@@ -37,7 +26,7 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === 'object' && x !== null && !Array.isArray(x)
 }
 
-function isMirror(x: unknown): x is RemoteCaisseMirror {
+function isMirror(x: unknown): x is StoredHeldCart['mirror'] {
   if (!isRecord(x)) return false
   if (!isRecord(x.quantities)) return false
   if (typeof x.refundMode !== 'boolean') return false

@@ -2,6 +2,7 @@
 
 import type { AppPersistedData } from '@shared/catalog'
 import type { RemoteCaisseMirror } from '@shared/remoteCaisseMirror'
+import type { HeldCartPersistedState, StoredHeldCart } from '@shared/heldCarts'
 import type { ClientDisplayState, ClientPaymentDetail } from '@shared/clientDisplay'
 import type { SaleRecord } from '@shared/sales'
 import type { TicketUnitPayload } from '@shared/ticket'
@@ -245,7 +246,16 @@ interface CaisseAPI {
   onTabletPaymentOverlay: (cb: () => void) => () => void
   getRemoteCaisseInfo: () => Promise<{ port: number; urls: string[] }>
   remoteCaisseGetMirror: () => Promise<RemoteCaisseMirror>
-  remoteCaissePublishState: (state: RemoteCaisseMirror) => Promise<{ ok: boolean }>
+  remoteCaisseGetCartGate: () => Promise<{ cartEditor: 'pc' | 'tablet' | null }>
+  remoteCaisseForceCartControl: () => Promise<{
+    ok: true
+    cartEditor: 'pc' | 'tablet' | null
+    previousEditor: 'pc' | 'tablet' | null
+    claimedBy: 'pc' | 'tablet'
+  }>
+  remoteCaissePublishState: (
+    state: RemoteCaisseMirror
+  ) => Promise<{ ok: true } | { ok: false; error: string }>
   remoteCaisseSetConfig: (payload: {
     enabled?: boolean
     regenerateToken?: boolean
@@ -253,8 +263,59 @@ interface CaisseAPI {
     remoteCaisseRequireToken?: 0 | 1
   }) => Promise<{ ok: true; token: string | null; enabled: boolean; tokenRequired: boolean }>
   onRemoteCaisseStateSync: (cb: (state: RemoteCaisseMirror) => void) => () => void
+  onRemoteCartEditor: (cb: (editor: 'pc' | 'tablet' | null) => void) => () => void
+  onRemoteCartControlForced: (
+    cb: (p: {
+      cartEditor: 'pc' | 'tablet' | null
+      previousEditor: 'pc' | 'tablet' | null
+      claimedBy: 'pc' | 'tablet'
+    }) => void
+  ) => () => void
+  onRemoteCaisseEventChanged: (
+    cb: (p: {
+      eventId: string | null
+      eventName: string | null
+      previousEventId: string | null
+      previousEventName: string | null
+    }) => void
+  ) => () => void
   onRemoteCaisseRefreshData: (cb: () => void) => () => void
   onRemoteCaisseSaleDone: (cb: (p: { orderNumber: number; totalCents: number }) => void) => () => void
+  heldCartsGet: () => Promise<
+    | { ok: true; entries: StoredHeldCart[]; nextHoldTicketNum: number }
+    | { ok: false; error: string }
+  >
+  heldCartsSet: (
+    state: HeldCartPersistedState
+  ) => Promise<
+    | { ok: true; entries: StoredHeldCart[]; nextHoldTicketNum: number }
+    | { ok: false; error: string }
+  >
+  heldCartsPlace: (payload: {
+    displayName?: string
+    totalCents: number
+    lineCount: number
+    mirror: RemoteCaisseMirror
+  }) => Promise<
+    | { ok: true; entry: StoredHeldCart; state: HeldCartPersistedState }
+    | { ok: false; error: string }
+  >
+  heldCartsAdd: (payload: {
+    displayName?: string
+    totalCents: number
+    lineCount: number
+    mirror: RemoteCaisseMirror
+  }) => Promise<
+    | { ok: true; entry: StoredHeldCart; state: HeldCartPersistedState }
+    | { ok: false; error: string }
+  >
+  heldCartsRemove: (
+    id: string
+  ) => Promise<
+    | { ok: true; entries: StoredHeldCart[]; nextHoldTicketNum: number }
+    | { ok: false; error: string }
+  >
+  onHeldCartsUpdated: (cb: () => void) => () => void
   backupExportFull: () => Promise<
     | { ok: true; path: string }
     | { ok: false; canceled: true }

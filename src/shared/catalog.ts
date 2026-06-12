@@ -234,15 +234,31 @@ export interface DiscountMotifPreset {
 }
 
 export const DISCOUNT_MOTIF_REASON_MAX = 200
+/** Séparateur label / commentaire dans les motifs enregistrés (récap, etc.). */
+export const DISCOUNT_MOTIF_REASON_SEP = ' — '
 
 export function formatDiscountMotifReason(label: string, comment: string): string {
   const l = typeof label === 'string' ? label.trim() : ''
   const c = typeof comment === 'string' ? comment.trim() : ''
   if (!l && !c) return ''
   if (!c) return l.length > DISCOUNT_MOTIF_REASON_MAX ? l.slice(0, DISCOUNT_MOTIF_REASON_MAX) : l
-  const sep = ' — '
-  const full = `${l}${sep}${c}`
+  const full = `${l}${DISCOUNT_MOTIF_REASON_SEP}${c}`
   return full.length > DISCOUNT_MOTIF_REASON_MAX ? full.slice(0, DISCOUNT_MOTIF_REASON_MAX) : full
+}
+
+/** Découpe un motif enregistré pour affichage ticket unitaire (label et commentaire sur lignes séparées). */
+export function splitDiscountMotifReason(reason: string | undefined | null): {
+  label: string
+  comment?: string
+} {
+  const t = typeof reason === 'string' ? reason.trim() : ''
+  if (!t) return { label: '' }
+  const i = t.indexOf(DISCOUNT_MOTIF_REASON_SEP)
+  if (i === -1) return { label: t }
+  const label = t.slice(0, i).trim()
+  const comment = t.slice(i + DISCOUNT_MOTIF_REASON_SEP.length).trim()
+  if (!comment) return { label: t }
+  return { label, comment }
 }
 
 export const DEFAULT_DISCOUNT_MOTIFS: DiscountMotifPreset[] = [
@@ -291,6 +307,8 @@ export interface AppPersistedData {
   integrations: IntegrationsConfig
   /** Stock par identifiant d’événement, puis par article */
   stockByEvent: Record<string, Record<string, number>>
+  /** Articles désactivés pour un événement (non vendables à la caisse). */
+  disabledProductsByEvent: Record<string, Record<string, true>>
   /** Session ouverte : fond de caisse enregistré pour pouvoir encaisser */
   eventSessions: Record<string, EventSessionInfo>
   selectedEventId: string | null
@@ -411,6 +429,7 @@ export function defaultPersistedData(): AppPersistedData {
       }
     },
     stockByEvent: {},
+    disabledProductsByEvent: {},
     eventSessions: {},
     selectedEventId: null,
     printing: {

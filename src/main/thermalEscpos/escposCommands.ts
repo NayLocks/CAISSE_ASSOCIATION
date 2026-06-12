@@ -74,6 +74,17 @@ export function escposDashRule(maxChars = ESCPOS_DEFAULT_LINE_CHARS): Buffer {
   return Buffer.from(`${'-'.repeat(maxChars)}\n`, 'latin1')
 }
 
+/** Largeur des traits / cadres du ticket unitaire (nombre de tirets horizontaux). */
+export const ESCPOS_UNIT_TICKET_FRAME_DASHES = 40
+/** Trait court : à imprimer avec `escposAlignCenter()` actif (pas de padding manuel). */
+export function escposCenteredRule(
+  maxChars = ESCPOS_DEFAULT_LINE_CHARS,
+  ruleLen = ESCPOS_UNIT_TICKET_FRAME_DASHES
+): Buffer {
+  const len = Math.min(Math.max(8, ruleLen), maxChars)
+  return Buffer.from(`${'-'.repeat(len)}\n`, 'latin1')
+}
+
 export function concatBuffers(chunks: Buffer[]): Buffer {
   return Buffer.concat(chunks)
 }
@@ -84,10 +95,14 @@ export function escposTextBlock(s: string, maxChars = ESCPOS_DEFAULT_LINE_CHARS)
 
 /**
  * Bloc encadré type « validité » HTML (bordure 1 px) : lignes ASCII + / -.
- * Chaîne vide si aucune ligne utile après filtrage.
+ * À imprimer avec `escposAlignCenter()` actif. Chaîne vide si aucune ligne utile.
  */
-export function escposBoxedNotice(text: string, maxChars = ESCPOS_DEFAULT_LINE_CHARS): Buffer {
-  const innerW = Math.max(1, maxChars - 2)
+export function escposBoxedNotice(
+  text: string,
+  maxChars = ESCPOS_DEFAULT_LINE_CHARS,
+  frameDashes = ESCPOS_UNIT_TICKET_FRAME_DASHES
+): Buffer {
+  const innerW = Math.min(Math.max(8, frameDashes), maxChars - 2)
   const rows: string[] = []
   for (const para of text.split(/\r?\n/)) {
     const p = para.trim()
@@ -95,7 +110,7 @@ export function escposBoxedNotice(text: string, maxChars = ESCPOS_DEFAULT_LINE_C
     rows.push(...wrapEscposLines(escposSafeText(p), innerW))
   }
   if (rows.length === 0) return Buffer.alloc(0)
-  const horiz = '-'.repeat(maxChars - 2)
+  const horiz = '-'.repeat(innerW)
   const parts: string[] = []
   parts.push(`+${horiz}+`)
   for (const r of rows) {

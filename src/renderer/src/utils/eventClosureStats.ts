@@ -8,7 +8,7 @@ import {
   totalCardCashExchangeCashOutCents,
   totalCardCentsForEvent,
   totalRevenueCentsForEvent
-} from '@renderer/utils/eventSalesStats'
+} from '@shared/eventSalesStats'
 
 export type EventClosureStats = {
   saleCount: number

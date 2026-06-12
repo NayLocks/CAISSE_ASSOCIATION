@@ -10,7 +10,11 @@ import {
   printUnitTicketsToDevice
 } from './printWindow.js'
 import { printUnitTicketsEscpos } from './thermalEscpos/index.js'
-import { unitTicketDocumentOptionsFromAssociation } from './cashReceipt/receiptDocuments.js'
+import {
+  buildHoldSlipDocument,
+  unitTicketDocumentOptionsFromAssociation
+} from './cashReceipt/receiptDocuments.js'
+import { printReceiptDocument } from './cashReceipt/index.js'
 
 function logoMime(ext: string): string {
   switch (ext.toLowerCase()) {
@@ -40,6 +44,34 @@ function readLogoDataUrl(fileName: string | null): string | null {
     return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(buf.toString('utf-8'))}`
   }
   return `data:${mime};base64,${buf.toString('base64')}`
+}
+
+/** Ticket d’attente demandé par la tablette (même rendu que le PC, imprimante de la caisse). */
+export async function executeRemoteHoldSlipPrint(
+  ticketLabel: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const data = loadPersistedData()
+  const deviceName = data.printing.deviceName?.trim()
+  if (!deviceName) {
+    return { ok: false, error: 'Aucune imprimante configurée sur la caisse (menu Impression).' }
+  }
+  const eid = data.selectedEventId
+  const ev = eid ? data.events.find((x) => x.id === eid) : undefined
+  const logo = readLogoDataUrl(data.association.logoFile)
+  const docOpts = unitTicketDocumentOptionsFromAssociation(data.association)
+  const html = buildHoldSlipDocument(
+    {
+      ticketLabel: ticketLabel.trim(),
+      associationName: data.association.name.trim(),
+      eventName: ev?.name?.trim() ?? '—',
+      atIso: new Date().toISOString()
+    },
+    logo,
+    docOpts
+  )
+  const silent = data.printing.silentPrint !== false
+  const r = await printReceiptDocument(html, deviceName, silent)
+  return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'Impression impossible.' }
 }
 
 export async function executeRemoteReceiptPrint(opts: {

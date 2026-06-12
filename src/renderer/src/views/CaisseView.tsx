@@ -16,7 +16,13 @@ import type {
 } from '@shared/clientDisplay'
 import type { SaleLineSnapshot, SalePayment, SaleRecord } from '@shared/sales'
 import type { TicketUnitPayload } from '@shared/ticket'
-import { getStockMap, isLowStock, listLowStockProducts } from '@shared/inventory'
+import {
+  getStockMap,
+  isLowStock,
+  isProductEnabledForEvent,
+  listLowStockProductsAfterCart,
+  stockRemainingForCart
+} from '@shared/inventory'
 import {
   finalUnitCents,
   lineBaseUnitCents,
@@ -31,10 +37,10 @@ import { repairStaleFocus } from '@renderer/utils/blurActiveElement'
 import { centsToEurosInput, formatMoney, parseEurosToCents } from '@renderer/utils/money'
 import {
   heldCartsStorageKey,
-  readHeldCartState,
-  writeHeldCartState,
-  type StoredHeldCart
+  readHeldCartState
 } from '@renderer/utils/heldCartsStorage'
+import type { StoredHeldCart } from '@shared/heldCarts'
+import { MAX_HELD_CARTS } from '@shared/heldCarts'
 import {
   CHOOSEABLE_SHORTCUT_TOKENS,
   eventMatchesShortcut,
@@ -50,6 +56,7 @@ import { formatOrderDigits } from '@shared/orderDigits'
 import { formatOrderDisplay } from '@renderer/utils/order'
 import PaymentModal from '@renderer/components/PaymentModal'
 import EmptyState from '@renderer/components/EmptyState'
+import HeldCartsModals from '@renderer/components/HeldCartsModals'
 
 function useClock(): Date {
   const [now, setNow] = useState(() => new Date())
@@ -73,8 +80,6 @@ type CartLineRow = {
   discountPercent: number
   discountReason: string
 }
-
-const MAX_HELD_CARTS = 12
 
 type HeldCartEntry = StoredHeldCart
 
@@ -143,6 +148,8 @@ export default function CaisseView(): JSX.Element {
   const [tabletPayTick, setTabletPayTick] = useState(0)
   const [heldCarts, setHeldCarts] = useState<HeldCartEntry[]>([])
   const [nextHoldTicketNum, setNextHoldTicketNum] = useState(1)
+  const [heldModalView, setHeldModalView] = useState<null | 'menu' | 'list'>(null)
+  const [remoteCartEditor, setRemoteCartEditor] = useState<'pc' | 'tablet' | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [productSearch, setProductSearch] = useState('')
   const productSearchInputRef = useRef<HTMLInputElement>(null)
@@ -172,7 +179,6 @@ export default function CaisseView(): JSX.Element {
   useFocusTrap(variablePriceOverlayRef, Boolean(variablePriceModal))
 
   const applyingRemoteCart = useRef(false)
-  const skipHeldPersist = useRef(true)
 
   const onPaymentDisplayUpdate = useCallback((d: ClientPaymentDetail | null) => {
     setPaymentDetail(d)
@@ -213,6 +219,43 @@ export default function CaisseView(): JSX.Element {
       }
     })
   }, [])
+
+  const [forceCartPrompt, setForceCartPrompt] = useState(false)
+
+  useEffect(() => {
+    void window.caisse.remoteCaisseGetCartGate().then((g) => setRemoteCartEditor(g.cartEditor))
+    const offEditor = window.caisse.onRemoteCartEditor((editor) => setRemoteCartEditor(editor))
+    const offForced = window.caisse.onRemoteCartControlForced((p) => {
+      setRemoteCartEditor(p.cartEditor)
+      if (p.claimedBy === 'tablet') {
+        showToast({
+          variant: 'warning',
+          message: 'La tablette a repris le contrôle du panier partagé — caisse PC en lecture seule.'
+        })
+      }
+    })
+    return () => {
+      offEditor()
+      offForced()
+    }
+  }, [showToast])
+
+  const forceCartControlOnPc = useCallback(async () => {
+    const r = await window.caisse.remoteCaisseForceCartControl()
+    setRemoteCartEditor(r.cartEditor)
+    setForceCartPrompt(false)
+    showToast({ variant: 'success', message: 'Contrôle du panier repris sur ce PC.' })
+  }, [showToast])
+
+  useEffect(() => {
+    return window.caisse.onRemoteCaisseEventChanged((p) => {
+      const name = p.eventName?.trim() || '—'
+      showToast({
+        variant: 'info',
+        message: `Événement changé depuis la tablette : « ${name} ».`
+      })
+    })
+  }, [showToast])
 
   useEffect(() => {
     return window.caisse.onRemoteCaisseStateSync((m: RemoteCaisseMirror) => {
@@ -303,8 +346,33 @@ export default function CaisseView(): JSX.Element {
 
   useEffect(() => {
     if (applyingRemoteCart.current) return
-    void window.caisse.remoteCaissePublishState(remoteMirrorPayload)
-  }, [remoteMirrorPayload])
+    void window.caisse.remoteCaissePublishState(remoteMirrorPayload).then((r) => {
+      if (!r.ok) {
+        showToast({ variant: 'error', message: r.error })
+        applyingRemoteCart.current = true
+        void window.caisse.remoteCaisseGetMirror().then((m) => {
+          setQuantities(m.quantities)
+          setRefundMode(m.refundMode)
+          setRefundMaxByProduct(m.refundMaxByProduct)
+          setRefundSourceMeta(m.refundSourceMeta)
+          setPriceOverrides(m.priceOverrides)
+          setDiscountPctByProduct(m.lineDiscountPct ?? {})
+          setDiscountReasonByProduct(m.lineDiscountReason ?? {})
+          setCartDiscountPct(
+            typeof m.cartDiscountPct === 'number' && Number.isFinite(m.cartDiscountPct)
+              ? Math.min(100, Math.max(0, Math.round(m.cartDiscountPct)))
+              : 0
+          )
+          setCartDiscountReason(
+            typeof m.cartDiscountReason === 'string' ? m.cartDiscountReason.trim().slice(0, 200) : ''
+          )
+          window.setTimeout(() => {
+            applyingRemoteCart.current = false
+          }, 80)
+        })
+      }
+    })
+  }, [remoteMirrorPayload, showToast])
 
   const setRemoteClientEnabled = useCallback(async (enabled: boolean) => {
     await window.caisse.setClientDisplayRemoteEnabled(enabled)
@@ -367,23 +435,49 @@ export default function CaisseView(): JSX.Element {
     ]
   )
 
+  const refreshHeldFromServer = useCallback(async () => {
+    const r = await window.caisse.heldCartsGet()
+    if (r.ok) {
+      setHeldCarts(r.entries)
+      setNextHoldTicketNum(r.nextHoldTicketNum)
+    }
+  }, [])
+
   useEffect(() => {
-    skipHeldPersist.current = true
-    const st = readHeldCartState(heldStorageKey)
-    setHeldCarts(st.entries)
-    setNextHoldTicketNum(st.nextHoldTicketNum)
+    let cancelled = false
+    void (async () => {
+      const r = await window.caisse.heldCartsGet()
+      if (cancelled || !r.ok) return
+      if (r.entries.length === 0) {
+        const legacy = readHeldCartState(heldStorageKey)
+        if (legacy.entries.length > 0) {
+          const mig = await window.caisse.heldCartsSet(legacy)
+          if (cancelled) return
+          if (mig.ok) {
+            setHeldCarts(mig.entries)
+            setNextHoldTicketNum(mig.nextHoldTicketNum)
+            try {
+              localStorage.removeItem(heldStorageKey)
+            } catch {
+              /* quota ou navigation privée */
+            }
+            return
+          }
+        }
+      }
+      setHeldCarts(r.entries)
+      setNextHoldTicketNum(r.nextHoldTicketNum)
+    })()
+    return () => {
+      cancelled = true
+    }
   }, [heldStorageKey])
 
   useEffect(() => {
-    if (skipHeldPersist.current) {
-      skipHeldPersist.current = false
-      return
-    }
-    const t = window.setTimeout(() => {
-      writeHeldCartState(heldStorageKey, { entries: heldCarts, nextHoldTicketNum })
-    }, 350)
-    return () => window.clearTimeout(t)
-  }, [heldStorageKey, heldCarts, nextHoldTicketNum])
+    return window.caisse.onHeldCartsUpdated(() => {
+      void refreshHeldFromServer()
+    })
+  }, [refreshHeldFromServer])
 
   const [floatDraft, setFloatDraft] = useState('0')
 
@@ -414,11 +508,12 @@ export default function CaisseView(): JSX.Element {
   const categoryTabs = data.categories
 
   const filtered = useMemo(() => {
-    const base = category === 'all' ? products : products.filter((p) => p.category === category)
+    let base = category === 'all' ? products : products.filter((p) => p.category === category)
+    base = base.filter((p) => isProductEnabledForEvent(data, data.selectedEventId, p.id))
     const q = productSearch.trim().toLowerCase()
     if (!q) return base
     return base.filter((p) => p.name.toLowerCase().includes(q))
-  }, [category, products, productSearch])
+  }, [category, products, productSearch, refundMode, data])
 
   const lines = useMemo((): CartLineRow[] => {
     const out: CartLineRow[] = []
@@ -564,7 +659,23 @@ export default function CaisseView(): JSX.Element {
 
   const add = useCallback(
     (p: ProductConfig) => {
+      if (remoteCartEditor === 'tablet') {
+        showToast({
+          variant: 'error',
+          message: 'La tablette édite le panier partagé — modification impossible sur le PC.'
+        })
+        return
+      }
       if (!canSell) return
+      if (!refundMode && !isProductEnabledForEvent(data, data.selectedEventId, p.id)) {
+        showToast({ variant: 'warning', message: `« ${p.name} » n’est pas disponible sur cet événement.` })
+        return
+      }
+      const gate = canAddProductToCart(products, quantities, p)
+      if (!gate.ok) {
+        showToast({ variant: 'warning', message: gate.message })
+        return
+      }
       const max = stockAvailable(p, stock)
       const cur = quantities[p.id] ?? 0
       const cap = refundMaxByProduct?.[p.id]
@@ -572,12 +683,23 @@ export default function CaisseView(): JSX.Element {
       if (!refundMode && p.trackStock && cur + 1 > max) return
       setQuantities((prev) => ({ ...prev, [p.id]: cur + 1 }))
     },
-    [canSell, quantities, stock, refundMode, refundMaxByProduct]
+    [canSell, data, quantities, stock, refundMode, refundMaxByProduct, remoteCartEditor, showToast, products]
   )
 
   const promptAddProduct = useCallback(
     (p: ProductConfig) => {
+      if (remoteCartEditor === 'tablet') {
+        showToast({
+          variant: 'error',
+          message: 'La tablette édite le panier partagé — modification impossible sur le PC.'
+        })
+        return
+      }
       if (!canSell) return
+      if (!refundMode && !isProductEnabledForEvent(data, data.selectedEventId, p.id)) {
+        showToast({ variant: 'warning', message: `« ${p.name} » n’est pas disponible sur cet événement.` })
+        return
+      }
       const max = stockAvailable(p, stock)
       const cur = quantities[p.id] ?? 0
       const cap = refundMaxByProduct?.[p.id]
@@ -599,11 +721,18 @@ export default function CaisseView(): JSX.Element {
       }
       add(p)
     },
-    [add, canSell, products, quantities, priceOverrides, showToast, stock, refundMode, refundMaxByProduct]
+    [add, canSell, products, quantities, priceOverrides, showToast, stock, refundMode, refundMaxByProduct, remoteCartEditor]
   )
 
   const setQty = useCallback(
     (id: string, qty: number) => {
+      if (remoteCartEditor === 'tablet') {
+        showToast({
+          variant: 'error',
+          message: 'La tablette édite le panier partagé — modification impossible sur le PC.'
+        })
+        return
+      }
       if (!canSell) return
       const product = products.find((p) => p.id === id)
       if (!product) return
@@ -638,7 +767,7 @@ export default function CaisseView(): JSX.Element {
         return n
       })
     },
-    [canSell, products, stock, refundMode, refundMaxByProduct]
+    [canSell, products, stock, refundMode, refundMaxByProduct, remoteCartEditor, showToast]
   )
 
   const confirmVariablePrice = useCallback(() => {
@@ -663,13 +792,6 @@ export default function CaisseView(): JSX.Element {
     (id: string, curQty: number) => {
       const product = products.find((p) => p.id === id)
       if (!product) return
-      if (product.cardCashExchange) {
-        showToast({
-          variant: 'warning',
-          message: 'Un seul échange carte / espèces à la fois (quantité 1).'
-        })
-        return
-      }
       if (product.variablePrice) {
         const prevCents = priceOverrides[id] ?? product.priceCents
         setVariablePriceModal({
@@ -751,64 +873,33 @@ export default function CaisseView(): JSX.Element {
       })
       return
     }
-    const dn = data.printing.deviceName?.trim()
-    if (!dn) {
-      showToast({
-        variant: 'error',
-        message:
-          'Aucune imprimante n’est sélectionnée (menu Impression). Le ticket d’attente est obligatoire — panier non mis de côté.'
-      })
-      return
-    }
-    const atIso = new Date().toISOString()
-    const ticketNum = nextHoldTicketNum
-    const ticketLabel = `Ticket ${formatOrderDigits(ticketNum)}`
-    const logo = await window.caisse.getLogoDataUrl(data.association.logoFile)
-    const r = await window.caisse.printHoldSlip({
-      ticketLabel,
-      associationName: data.association.name.trim(),
-      eventName: selectedEvent?.name?.trim() ?? '—',
-      atIso,
-      deviceName: dn,
-      logoDataUrl: logo,
-      silent: data.printing.silentPrint
+    const ticketLabel = `Ticket ${formatOrderDigits(nextHoldTicketNum)}`
+    const place = await window.caisse.heldCartsPlace({
+      displayName: ticketLabel,
+      totalCents,
+      lineCount: lines.length,
+      mirror: structuredClone(remoteMirrorPayload)
     })
-    if (!r.ok) {
+    if (!place.ok) {
       showToast({
         variant: 'error',
-        message: r.error ?? 'Impression impossible — panier non mis en attente.'
+        message: place.error ?? 'Impossible de mettre le panier en attente.'
       })
       return
     }
-    const mirror: RemoteCaisseMirror = structuredClone(remoteMirrorPayload)
-    setHeldCarts((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        displayName: ticketLabel,
-        totalCents,
-        lineCount: lines.length,
-        savedAt: Date.now(),
-        mirror
-      }
-    ])
-    setNextHoldTicketNum(ticketNum + 1)
+    setHeldCarts(place.state.entries)
+    setNextHoldTicketNum(place.state.nextHoldTicketNum)
     clearCart()
     setRefundMode(false)
     showToast({
       variant: 'success',
-      message: `${ticketLabel} : ticket d’attente imprimé, panier mis de côté.`
+      message: `${place.entry.displayName} : ticket d’attente imprimé, panier mis de côté.`
     })
   }, [
     refundMode,
     lines.length,
     heldCarts.length,
     nextHoldTicketNum,
-    data.printing.deviceName,
-    data.printing.silentPrint,
-    data.association.name,
-    data.association.logoFile,
-    selectedEvent?.name,
     remoteMirrorPayload,
     totalCents,
     clearCart,
@@ -816,7 +907,7 @@ export default function CaisseView(): JSX.Element {
   ])
 
   const restoreHeldCart = useCallback(
-    (entryId: string) => {
+    async (entryId: string) => {
       const entry = heldCarts.find((h) => h.id === entryId)
       if (!entry) return
       const hasActive = Object.values(quantities).some((q) => (q ?? 0) > 0)
@@ -835,16 +926,29 @@ export default function CaisseView(): JSX.Element {
         })
         return
       }
+      const r = await window.caisse.heldCartsRemove(entryId)
+      if (!r.ok) {
+        showToast({ variant: 'error', message: r.error ?? 'Impossible de reprendre ce panier.' })
+        return
+      }
       applyMirrorToCart(structuredClone(entry.mirror))
-      setHeldCarts((prev) => prev.filter((h) => h.id !== entryId))
+      setHeldCarts(r.entries)
+      setNextHoldTicketNum(r.nextHoldTicketNum)
+      setHeldModalView(null)
       showToast({ message: 'Panier repris.' })
     },
     [heldCarts, quantities, refundMode, applyMirrorToCart, showToast]
   )
 
   const discardHeldCart = useCallback(
-    (entryId: string) => {
-      setHeldCarts((prev) => prev.filter((h) => h.id !== entryId))
+    async (entryId: string) => {
+      const r = await window.caisse.heldCartsRemove(entryId)
+      if (!r.ok) {
+        showToast({ variant: 'error', message: r.error ?? 'Suppression impossible.' })
+        return
+      }
+      setHeldCarts(r.entries)
+      setNextHoldTicketNum(r.nextHoldTicketNum)
       showToast({ message: 'Panier en attente supprimé (non encaissé).' })
     },
     [showToast]
@@ -1216,7 +1320,7 @@ export default function CaisseView(): JSX.Element {
       }
       if (eventMatchesShortcut(e, ks.holdCart)) {
         e.preventDefault()
-        void putCartOnHold()
+        setHeldModalView('menu')
         return
       }
       if (eventMatchesShortcut(e, ks.clearCart)) {
@@ -1256,10 +1360,11 @@ export default function CaisseView(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [putCartOnHold, shortcutsOpen, clearCart, toggleRefundMode, openPaymentCash, openPaymentCard])
 
-  const lowStockProducts = useMemo(
-    () => listLowStockProducts(products, stock),
-    [products, stock]
-  )
+  const cartLockedByTablet = remoteCartEditor === 'tablet'
+  const lowStockProducts = useMemo(() => {
+    const visible = products.filter((p) => isProductEnabledForEvent(data, data.selectedEventId, p.id))
+    return listLowStockProductsAfterCart(visible, stock, quantities, refundMode)
+  }, [products, stock, quantities, refundMode, data])
 
   return (
     <>
@@ -1269,6 +1374,21 @@ export default function CaisseView(): JSX.Element {
             <div className="banner-warn" role="status">
               Sélectionnez un <strong>événement actif</strong> (menu Événements ou liste ci-dessous)
               pour encaisser.
+            </div>
+          )}
+          {cartLockedByTablet && (
+            <div className="banner-warn banner-cart-lock" role="status">
+              <p className="banner-cart-lock__text">
+                <strong>Tablette active</strong> — le panier partagé est modifié sur la tablette. Cette caisse
+                est en lecture seule.
+              </p>
+              <button
+                type="button"
+                className="btn btn-secondary btn-compact banner-cart-lock__btn"
+                onClick={() => setForceCartPrompt(true)}
+              >
+                Reprendre sur le PC
+              </button>
             </div>
           )}
           {lowStockProducts.length > 0 && canSell && !eventClosed && (
@@ -1351,9 +1471,13 @@ export default function CaisseView(): JSX.Element {
           <div className="grid-wrap">
             <div className="product-grid">
               {filtered.map((p) => {
-                const avail = stockAvailable(p, stock)
-                const disabled = !canSell || (!refundMode && p.trackStock && avail <= 0)
-                const low = isLowStock(p, avail)
+                const inCart = quantities[p.id] ?? 0
+                const remaining = stockRemainingForCart(p, stock, inCart, refundMode)
+                const disabled =
+                  cartLockedByTablet ||
+                  !canSell ||
+                  (!refundMode && p.trackStock && remaining <= 0)
+                const low = isLowStock(p, remaining)
                 return (
                   <button
                     key={p.id}
@@ -1367,7 +1491,7 @@ export default function CaisseView(): JSX.Element {
                           ? 'Indisponible'
                           : 'Rupture de stock'
                         : p.trackStock
-                          ? `${p.name} — stock : ${avail}`
+                          ? `${p.name} — stock : ${remaining}`
                           : p.name
                     }
                   >
@@ -1375,7 +1499,7 @@ export default function CaisseView(): JSX.Element {
                       className={`stock-badge${p.trackStock ? '' : ' stock-badge-muted'}${low ? ' stock-badge-low' : ''}`}
                       aria-hidden
                     >
-                      {p.trackStock ? avail : '—'}
+                      {p.trackStock ? remaining : '—'}
                     </span>
                     {productImg[p.id] ? (
                       <div className="product-card-visual">
@@ -1390,7 +1514,7 @@ export default function CaisseView(): JSX.Element {
                     </div>
                     {p.trackStock && (
                       <div className="stock-hint" aria-hidden>
-                        Stock {avail}
+                        Stock {remaining}
                       </div>
                     )}
                   </button>
@@ -1407,17 +1531,22 @@ export default function CaisseView(): JSX.Element {
               <div className="cart-head-actions">
                 <button
                   type="button"
-                  className="btn btn-secondary btn-hold-cart"
-                  disabled={!canSell || refundMode || lines.length === 0}
-                  title={`Imprime un ticket Ticket NNN d’attente puis met le panier de côté (${kbdShortcuts.holdCart})`}
-                  onClick={() => void putCartOnHold()}
+                  className="btn btn-secondary btn-held-menu"
+                  disabled={!canSell || refundMode || cartLockedByTablet}
+                  title={`Attente : récupérer ou mettre de côté le panier (${kbdShortcuts.holdCart})`}
+                  onClick={() => setHeldModalView('menu')}
                 >
-                  Mettre en attente
+                  Attente
+                  {heldCarts.length > 0 ? (
+                    <span className="held-recup-badge" aria-label={`${heldCarts.length} en attente`}>
+                      {heldCarts.length}
+                    </span>
+                  ) : null}
                 </button>
                 <button
                   type="button"
                   className="btn btn-secondary btn-cart-clear"
-                  disabled={lines.length === 0}
+                  disabled={lines.length === 0 || cartLockedByTablet}
                   onClick={clearCart}
                 >
                   Vider le panier
@@ -1473,43 +1602,6 @@ export default function CaisseView(): JSX.Element {
                 </span>
               </button>
             </div>
-            {heldCarts.length > 0 ? (
-              <div className="held-carts-bar" aria-label="Paniers en attente">
-                <div className="held-carts-list">
-                  {heldCarts.map((h) => (
-                    <div key={h.id} className="held-cart-row">
-                      <div className="held-cart-row-meta">
-                        <span className="held-cart-row-title">{h.displayName}</span>
-                        <span className="held-cart-row-sub">
-                          {formatMoney(h.totalCents)} · {h.lineCount} ligne{h.lineCount > 1 ? 's' : ''} ·{' '}
-                          {new Date(h.savedAt).toLocaleTimeString('fr-FR', {
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
-                        </span>
-                      </div>
-                      <div className="held-cart-row-actions">
-                        <button
-                          type="button"
-                          className="btn btn-secondary btn-held-restore"
-                          disabled={!canSell}
-                          onClick={() => restoreHeldCart(h.id)}
-                        >
-                          Reprendre
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-held-discard"
-                          onClick={() => discardHeldCart(h.id)}
-                        >
-                          Supprimer
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
             <div className="cart-meta-row" role="status" aria-live="polite">
               {refundMode && refundSourceMeta?.orderNumber != null && refundSourceMeta.orderNumber > 0 ? (
                 <span className="refund-source-pill" title="Remboursement lié à une vente passée">
@@ -1733,7 +1825,7 @@ export default function CaisseView(): JSX.Element {
             </div>
             {cartIsCardCashExchange ? (
               <p className="sub cart-exchange-hint" role="status">
-                Échange carte / espèces : paiement par carte uniquement (sortie d’espèces du tiroir).
+                Échange carte / espèces : paiement par carte uniquement (sortie d’espèces du tiroir). Quantité libre sur cet article.
               </p>
             ) : null}
             <div className={`actions${refundMode || cartIsCardCashExchange ? ' actions-single' : ' cart-pay-actions'}`}>
@@ -1741,7 +1833,7 @@ export default function CaisseView(): JSX.Element {
                 <button
                   type="button"
                   className="btn btn-primary btn-refund"
-                  disabled={lines.length === 0 || !data.selectedEventId || !canSell}
+                  disabled={lines.length === 0 || !data.selectedEventId || !canSell || cartLockedByTablet}
                   onClick={cartIsCardCashExchange ? openPaymentCard : openPaymentChoose}
                 >
                   Rembourser
@@ -1750,7 +1842,7 @@ export default function CaisseView(): JSX.Element {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={lines.length === 0 || !data.selectedEventId || !canSell}
+                  disabled={lines.length === 0 || !data.selectedEventId || !canSell || cartLockedByTablet}
                   onClick={openPaymentCard}
                 >
                   Payer par carte
@@ -1760,7 +1852,7 @@ export default function CaisseView(): JSX.Element {
                   <button
                     type="button"
                     className="btn btn-primary"
-                    disabled={lines.length === 0 || !data.selectedEventId || !canSell}
+                    disabled={lines.length === 0 || !data.selectedEventId || !canSell || cartLockedByTablet}
                     onClick={openPaymentCash}
                   >
                     Espèces
@@ -1768,7 +1860,7 @@ export default function CaisseView(): JSX.Element {
                   <button
                     type="button"
                     className="btn btn-primary"
-                    disabled={lines.length === 0 || !data.selectedEventId || !canSell}
+                    disabled={lines.length === 0 || !data.selectedEventId || !canSell || cartLockedByTablet}
                     onClick={openPaymentCard}
                   >
                     Carte
@@ -2278,6 +2370,50 @@ export default function CaisseView(): JSX.Element {
         </div>
       ) : null}
 
+      {forceCartPrompt ? (
+        <div
+          className="overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="force-cart-title"
+          onClick={() => setForceCartPrompt(false)}
+        >
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3 id="force-cart-title">Reprendre le panier</h3>
+            <p className="sub">
+              La tablette passera en lecture seule. Le contenu actuel du panier est conservé sur les deux
+              terminaux.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setForceCartPrompt(false)}>
+                Annuler
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void forceCartControlOnPc()}
+              >
+                Reprendre sur le PC
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {heldModalView ? (
+        <HeldCartsModals
+          view={heldModalView}
+          heldCarts={heldCarts}
+          linesCount={lines.length}
+          canSell={canSell}
+          onClose={() => setHeldModalView(null)}
+          onViewChange={setHeldModalView}
+          onPutOnHold={() => void putCartOnHold()}
+          onRestore={(id) => void restoreHeldCart(id)}
+          onDiscard={(id) => void discardHeldCart(id)}
+        />
+      ) : null}
+
       <PaymentModal
         open={showPayment}
         totalCents={totalCents}
@@ -2438,7 +2574,7 @@ export default function CaisseView(): JSX.Element {
                       ) : null}
                       {id === 'holdCart' ? (
                         <span className="sub block">
-                          Imprime le ticket « Ticket NNN d’attente » puis range le panier (imprimante requise).
+                          Ouvre le menu Attente (récupérer une vente ou mettre le panier de côté).
                         </span>
                       ) : null}
                       {id === 'focusSearch' ? (

@@ -524,6 +524,24 @@
   font-size: 0.88rem;
 }
 
+.banner-cart-lock {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.banner-cart-lock__text {
+  margin: 0;
+  flex: 1;
+  min-width: 12rem;
+}
+
+.banner-cart-lock__btn {
+  flex-shrink: 0;
+}
+
 .stock-hint {
   font-size: 0.7rem;
   color: var(--muted);
@@ -940,7 +958,7 @@
 
 /* Modules hors caisse : contenu plus large (la caisse n’utilise pas .page-inner) */
 .view-root.view-pad .page-inner {
-  max-width: min(1400px, 96vw);
+  max-width: min(1600px, 98vw);
 }
 
 .view-root.view-pad .page-inner--full {
@@ -994,14 +1012,78 @@
   margin-bottom: 1rem;
 }
 
+.stock-table-wrap {
+  overflow-x: auto;
+}
+
+.stock-table {
+  min-width: 100%;
+  width: 100%;
+}
+
 .stock-actions-col {
-  min-width: 280px;
+  min-width: 13rem;
+}
+
+.stock-active-col {
+  min-width: 8rem;
+}
+
+.stock-active-cell {
+  white-space: nowrap;
+}
+
+.stock-actif-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 5.5rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: var(--font);
+}
+
+.stock-actif-btn--on {
+  background: rgba(34, 197, 94, 0.18);
+  border-color: rgba(34, 197, 94, 0.45);
+  color: #86efac;
+}
+
+.stock-actif-btn--off {
+  background: rgba(100, 116, 139, 0.2);
+  border-color: rgba(148, 163, 184, 0.35);
+  color: var(--muted);
+}
+
+.stock-actif-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.stock-actions-cell {
+  white-space: nowrap;
 }
 
 .stock-actions-cell {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+.stock-row-inactive td {
+  opacity: 0.72;
+}
+
+.stock-row-inactive .stock-active-cell {
+  opacity: 1;
+}
+
+.product-card-event-off:not(.disabled) {
+  opacity: 0.55;
 }
 
 .btn-compact {

@@ -4,8 +4,8 @@ import { join } from 'path'
 import { registerIpc } from './ipc'
 import { runStartupLicenseDataRefreshIfOnline } from './licenseDataRefresh.js'
 import { scheduleLaunchUpdateCheck } from './launchUpdateCheck.js'
-import { startClientDisplayServer } from './clientDisplayServer.js'
-import { startRemoteCaisseServer } from './remoteCaisseServer.js'
+import { startClientDisplayServer, stopClientDisplayServer } from './clientDisplayServer.js'
+import { startRemoteCaisseServer, stopRemoteCaisseServer } from './remoteCaisseServer.js'
 import { migrateLegacyIfNeeded } from './associationRegistry.js'
 import { startScheduledAutoBackup } from './scheduledBackup.js'
 import { startAssociationAutoSync } from './associationAutoSync.js'
@@ -82,4 +82,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+/** À la fermeture de l’app : arrêt des serveurs HTTP (affichage client + caisse distante). */
+app.on('will-quit', () => {
+  stopClientDisplayServer()
+  stopRemoteCaisseServer()
 })

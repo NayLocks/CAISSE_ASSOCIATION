@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs'
 import { extname } from 'path'
 import type { ProductConfig } from '../shared/catalog'
 import { formatOrderLabel } from '../shared/orderDigits.js'
-import { getStockMap } from '../shared/inventory'
+import { getStockMap, isProductEnabledForEvent } from '../shared/inventory'
 import { cartIsCardCashExchangeSale } from '../shared/cardCashExchange.js'
 import type { SaleLineSnapshot, SalePayment, SaleRecord } from '../shared/sales'
 import type { TicketUnitPayload } from '../shared/ticket'
@@ -96,6 +96,12 @@ function buildLines(
     if (q <= 0) continue
     const product = data.products.find((p) => p.id === id)
     if (!product) continue
+    if (!m.refundMode && !isProductEnabledForEvent(data, eid, id)) {
+      return {
+        ok: false,
+        error: `« ${product.name} » n’est pas disponible sur cet événement.`
+      }
+    }
     const cap = m.refundMaxByProduct?.[id]
     if (m.refundMode && cap != null && q > cap) {
       return { ok: false, error: `Quantité max pour « ${product.name} » : ${cap}.` }

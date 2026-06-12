@@ -1,7 +1,23 @@
 import type { SaleRecord } from '../../shared/sales'
 import type { ReceiptLegalInfo } from '../../shared/catalog'
-import { tvaMentionLines } from '../../shared/catalog.js'
+import { splitDiscountMotifReason, tvaMentionLines } from '../../shared/catalog.js'
 import { escHtml, formatMoneyEur, formatOrderNo } from './formatting.js'
+
+export function unitTicketMotifHtml(reason: string): string {
+  const { label, comment } = splitDiscountMotifReason(reason)
+  if (!label && !comment) return ''
+  if (comment) {
+    return `<div class="unit-motif"><div class="unit-motif__label">${escHtml(label)}</div><div class="unit-motif__comment">${escHtml(comment)}</div></div>`
+  }
+  return `<div class="unit-motif">${escHtml(label)}</div>`
+}
+
+export function unitTicketFootDatelineHtml(dateLong: string, timeShort: string): string {
+  return `<div class="foot-dateline" aria-label="Date et heure">
+    <div class="foot-dateline__date">${escHtml(dateLong)}</div>
+    <div class="foot-dateline__time">${escHtml(timeShort)}</div>
+  </div>`
+}
 
 export function orderLineHtml(orderNumber: number): string {
   if (orderNumber === 0) {

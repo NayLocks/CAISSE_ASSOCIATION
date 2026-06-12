@@ -599,6 +599,12 @@
   width: 3.5rem;
 }
 
+/* Colonne « Nom » (menu Articles) : garantit un champ de saisie confortable. */
+.td-name {
+  min-width: 16rem;
+  width: 28%;
+}
+
 .input-emoji {
   width: 3rem;
   text-align: center;

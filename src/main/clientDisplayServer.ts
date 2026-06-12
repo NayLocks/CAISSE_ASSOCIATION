@@ -946,3 +946,25 @@ export function startClientDisplayServer(): void {
   httpServer = s
   tryListen(s, 3847)
 }
+
+/** Arrêt propre (quitter l’app) : ferme les flux SSE ouverts puis libère le port. */
+export function stopClientDisplayServer(): void {
+  const s = httpServer
+  if (!s) return
+  httpServer = null
+  boundPort = 0
+  for (const res of sseClients) {
+    try {
+      res.end()
+    } catch {
+      /* ignore */
+    }
+  }
+  sseClients.clear()
+  try {
+    s.closeAllConnections()
+  } catch {
+    /* ignore */
+  }
+  s.close()
+}

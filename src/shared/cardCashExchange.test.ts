@@ -31,8 +31,16 @@ describe('cardCashExchange', () => {
     expect(r.ok).toBe(false)
   })
 
-  it('détecte une vente échange seule', () => {
+  it('détecte une vente échange seule (quantité libre)', () => {
     expect(cartIsCardCashExchangeSale([{ product: exchange, qty: 1 }])).toBe(true)
-    expect(cartIsCardCashExchangeSale([{ product: exchange, qty: 2 }])).toBe(false)
+    expect(cartIsCardCashExchangeSale([{ product: exchange, qty: 3 }])).toBe(true)
+    expect(cartIsCardCashExchangeSale([{ product: exchange, qty: 1 }, { product: cafe, qty: 1 }])).toBe(
+      false
+    )
+  })
+
+  it('autorise plusieurs unités du même échange', () => {
+    const r = canAddProductToCart([exchange], { ex: 2 }, exchange)
+    expect(r.ok).toBe(true)
   })
 })

@@ -59,7 +59,8 @@ export function receiptDocumentStyles(
     width: 100%;
     max-width: ${w};
     margin: 0 auto 1mm;
-    padding: 0 2.5mm;
+    /* Marge de sécurité : zone imprimable souvent < largeur du rouleau (70 mm). */
+    padding: 0 4mm;
     border: none;
     page-break-after: always;
     page-break-inside: avoid;
@@ -104,6 +105,14 @@ export function receiptDocumentStyles(
     padding: 2mm 3mm;
     line-height: 1.25;
   }
+  .ticket-unit .unit-motif__label,
+  .ticket-unit .unit-motif__comment {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .ticket-unit .unit-motif__comment {
+    margin-top: 1mm;
+  }
   .ticket-unit .hold-slip-kind {
     font-size: 13pt;
     font-weight: 700;
@@ -123,11 +132,7 @@ export function receiptDocumentStyles(
     color: #111;
   }
   .ticket-unit .foot-dateline {
-    display: flex;
-    justify-content: center;
-    align-items: baseline;
-    flex-wrap: nowrap;
-    white-space: nowrap;
+    display: block;
     font-weight: 500;
     color: #111;
     text-align: center;
@@ -135,13 +140,12 @@ export function receiptDocumentStyles(
   }
   .ticket-unit .foot-dateline__date {
     font-size: 7pt;
-  }
-  .ticket-unit .foot-dateline__dash {
-    font-size: 7pt;
-    flex: 0 0 auto;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .ticket-unit .foot-dateline__time {
     font-size: 7pt;
+    margin-top: 0.5mm;
   }
   .ticket-unit .validity-notice-wrap {
     width: 100%;
@@ -151,6 +155,7 @@ export function receiptDocumentStyles(
   }
   .ticket-unit .validity-notice-wrap .validity-notice {
     margin-bottom: 0;
+    max-width: 40ch;
   }
   .ticket-unit .validity-notice-wrap + .rule {
     margin-top: 0;
@@ -293,15 +298,24 @@ export function receiptDocumentStyles(
   }
   table.lines {
     width: 100%;
+    table-layout: fixed;
     border-collapse: collapse;
-    font-size: 9pt;
+    font-size: 8.5pt;
     font-weight: 500;
   }
   table.lines th,
   table.lines td {
-    padding: 2px 1.2mm;
+    padding: 2px 0.8mm;
     text-align: left;
     vertical-align: top;
+  }
+  /* Largeurs fixes (incluent le padding, box-sizing border-box) : Article = reste. */
+  table.lines th:nth-child(2) { width: 7mm; }
+  table.lines th:nth-child(3) { width: 12.5mm; }
+  table.lines th:nth-child(4) { width: 14mm; }
+  table.lines td:first-child {
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   table.lines th + th,
   table.lines td + td {
@@ -309,6 +323,7 @@ export function receiptDocumentStyles(
   }
   table.lines .r {
     text-align: right;
+    white-space: nowrap;
   }
   table.lines thead {
     border-bottom: 1px solid #000;

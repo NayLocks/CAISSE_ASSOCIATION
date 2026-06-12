@@ -8,8 +8,9 @@ import {
   totalCardCashExchangeCardCents,
   totalCardCashExchangeCashOutCents,
   totalCardCentsForEvent,
+  totalCashSalesHorsFondCents,
   totalRevenueCentsForEvent
-} from '@renderer/utils/eventSalesStats'
+} from '@shared/eventSalesStats'
 
 type Props = {
   orderCounter: number
@@ -84,11 +85,21 @@ export default function HeaderCashMenu({
     return theoreticalCashInDrawerCents(floatCents, eventSales)
   }, [floatCents, eventSales])
 
-  /** Mouvements espèces liés aux ventes / remboursements (tiroir − fond initial). */
+  const exchangeCashOutCents = useMemo(
+    () => (selectedEventId ? totalCardCashExchangeCashOutCents(sales, selectedEventId) : 0),
+    [sales, selectedEventId]
+  )
+
+  /** Ventes espèces classiques (hors fond, hors sorties liées aux échanges). */
   const ventesEspècesHorsFondCents = useMemo(() => {
-    if (cashDrawer == null || floatCents == null) return null
-    return cashDrawer - floatCents
-  }, [cashDrawer, floatCents])
+    if (floatCents == null || !selectedEventId) return null
+    return totalCashSalesHorsFondCents(sales, selectedEventId)
+  }, [floatCents, sales, selectedEventId])
+
+  const totalEspècesEstiméesCents = useMemo(() => {
+    if (floatCents == null || ventesEspècesHorsFondCents == null) return null
+    return floatCents + ventesEspècesHorsFondCents - exchangeCashOutCents
+  }, [floatCents, ventesEspècesHorsFondCents, exchangeCashOutCents])
 
   const cardTotal = useMemo(
     () => (selectedEventId ? totalCardCentsForEvent(sales, selectedEventId) : 0),
@@ -99,12 +110,6 @@ export default function HeaderCashMenu({
     () => (selectedEventId ? totalCardCashExchangeCardCents(sales, selectedEventId) : 0),
     [sales, selectedEventId]
   )
-
-  const exchangeCashOutCents = useMemo(
-    () => (selectedEventId ? totalCardCashExchangeCashOutCents(sales, selectedEventId) : 0),
-    [sales, selectedEventId]
-  )
-
   const ventesTotalCents = useMemo(
     () => (selectedEventId ? totalRevenueCentsForEvent(sales, selectedEventId) : 0),
     [sales, selectedEventId]
@@ -192,7 +197,7 @@ export default function HeaderCashMenu({
             ) : null}
             <div className="header-cash-highlight">
               <dt>Total espèces estimées</dt>
-              <dd>{cashDrawer != null ? formatMoney(cashDrawer) : '—'}</dd>
+              <dd>{totalEspècesEstiméesCents != null ? formatMoney(totalEspècesEstiméesCents) : '—'}</dd>
             </div>
           </dl>
 

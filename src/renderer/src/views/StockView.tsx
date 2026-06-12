@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { ProductConfig } from '@shared/catalog'
-import { getStockMap } from '@shared/inventory'
+import { getStockMap, isProductEnabledForEvent } from '@shared/inventory'
 import { useAppState } from '@renderer/state/AppStateContext'
 
 function parseQty(raw: string): number {
@@ -33,6 +33,10 @@ export default function StockView(): JSX.Element {
     return p.trackStock ? stockMap[p.id] ?? 0 : null
   }
 
+  function isEnabled(p: ProductConfig): boolean {
+    return isProductEnabledForEvent(data, eventId, p.id)
+  }
+
   function setDraft(id: string, v: string): void {
     setQtyDraft((prev) => ({ ...prev, [id]: v }))
   }
@@ -49,6 +53,21 @@ export default function StockView(): JSX.Element {
       const cur = map[productId] ?? 0
       map[productId] = Math.max(0, fn(cur))
       return { ...prev, stockByEvent: { ...prev.stockByEvent, [eid]: map } }
+    })
+  }
+
+  function toggleEnabled(p: ProductConfig): void {
+    if (!eventId) return
+    setData((prev) => {
+      const eid = prev.selectedEventId
+      if (!eid) return prev
+      const map = { ...(prev.disabledProductsByEvent[eid] ?? {}) }
+      if (map[p.id]) delete map[p.id]
+      else map[p.id] = true
+      return {
+        ...prev,
+        disabledProductsByEvent: { ...prev.disabledProductsByEvent, [eid]: map }
+      }
     })
   }
 
@@ -78,20 +97,21 @@ export default function StockView(): JSX.Element {
 
   return (
     <div className="page page-scroll">
-      <div className="page-inner">
+      <div className="page-inner page-inner--full">
         <div className="page-head">
           <div>
             <h2 className="page-title">Stock</h2>
             <p className="page-desc">
-              Stock par <strong>événement actif</strong> (en-tête). <strong>Ajouter</strong> (stock +
-              saisie), <strong>retirer</strong> (stock − saisie), <strong>remplacer</strong> (la saisie
-              devient le stock). Les articles sans suivi se règlent dans <strong>Articles</strong>.
+              Quantités et <strong>disponibilité à la vente</strong> pour l’{' '}
+              <strong>événement actif</strong> (en-tête). Cliquez{' '}
+              <strong>Actif / Inactif</strong> pour autoriser ou retirer un article de la caisse sur
+              cet événement (sans le supprimer du catalogue — voir menu <strong>Articles</strong>).
             </p>
           </div>
         </div>
         {!eventId && (
           <p className="banner-warn articles-event-warn">
-            Sélectionnez un événement dans l’en-tête pour gérer les quantités.
+            Sélectionnez un événement dans l’en-tête pour gérer les quantités et la disponibilité.
           </p>
         )}
 
@@ -105,27 +125,46 @@ export default function StockView(): JSX.Element {
           />
         </label>
 
-        <div className="table-wrap">
+        <div className="table-wrap stock-table-wrap">
           <table className="data-table stock-table">
             <thead>
               <tr>
                 <th>Article</th>
                 <th>Catégorie</th>
-                <th>Suivi</th>
+                <th className="stock-active-col" title="Article vendable à la caisse sur l’événement actif">
+                  Dispo. vente
+                </th>
+                <th>Suivi stock</th>
                 <th className="td-right">Stock actuel</th>
                 <th>Saisie</th>
-                <th className="stock-actions-col">Opérations</th>
+                <th className="stock-actions-col">Opérations stock</th>
               </tr>
             </thead>
             <tbody>
               {products.map((p) => {
                 const cur = stockVal(p)
+                const enabled = isEnabled(p)
                 return (
-                  <tr key={p.id}>
+                  <tr key={p.id} className={!enabled ? 'stock-row-inactive' : undefined}>
                     <td>
                       <span className="hist-emoji">{p.emoji}</span> {p.name}
                     </td>
                     <td>{catLabel(p.category)}</td>
+                    <td className="stock-active-cell">
+                      <button
+                        type="button"
+                        className={`stock-actif-btn${enabled ? ' stock-actif-btn--on' : ' stock-actif-btn--off'}`}
+                        disabled={!eventId}
+                        title={
+                          enabled
+                            ? 'Retirer de la vente sur cet événement'
+                            : 'Autoriser la vente sur cet événement'
+                        }
+                        onClick={() => toggleEnabled(p)}
+                      >
+                        {enabled ? 'Actif' : 'Inactif'}
+                      </button>
+                    </td>
                     <td>{p.trackStock ? 'Oui' : <span className="muted">Non</span>}</td>
                     <td className="td-right mono strong">
                       {cur !== null ? cur : <span className="muted">—</span>}

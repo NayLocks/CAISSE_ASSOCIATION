@@ -17,6 +17,19 @@ export function netCashEspècesDelta(payment: SalePayment, options?: NetCashDelt
   return sign * (payment.cashCents - payment.changeCents)
 }
 
+/** Mouvements espèces des ventes / remboursements classiques (hors échanges carte / espèces). */
+export function totalCashSalesHorsFondCents(sales: SaleRecord[], eventId: string): number {
+  let t = 0
+  for (const s of sales) {
+    if (s.eventId !== eventId) continue
+    if (s.cardCashExchange) continue
+    t += netCashEspècesDelta(s.payment, {
+      kind: s.kind === 'refund' ? 'refund' : 'sale'
+    })
+  }
+  return t
+}
+
 /** Espèces théoriques = fond + cumul des deltas espèces sur l’événement. */
 export function theoreticalCashInDrawerCents(
   floatCents: number,

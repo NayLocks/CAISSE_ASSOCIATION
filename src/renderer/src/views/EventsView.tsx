@@ -44,6 +44,7 @@ export default function EventsView(): JSX.Element {
       ...prev,
       events: [...prev.events, ev],
       stockByEvent: { ...prev.stockByEvent, [ev.id]: {} },
+      disabledProductsByEvent: { ...prev.disabledProductsByEvent, [ev.id]: {} },
       selectedEventId: prev.selectedEventId ?? ev.id
     }))
     setDraft({ name: '', date: '', notes: '' })
@@ -65,9 +66,11 @@ export default function EventsView(): JSX.Element {
           }
           const stockByEvent = { ...prev.stockByEvent }
           delete stockByEvent[id]
+          const disabledProductsByEvent = { ...prev.disabledProductsByEvent }
+          delete disabledProductsByEvent[id]
           const eventSessions = { ...prev.eventSessions }
           delete eventSessions[id]
-          return { ...prev, events, selectedEventId, stockByEvent, eventSessions }
+          return { ...prev, events, selectedEventId, stockByEvent, disabledProductsByEvent, eventSessions }
         })
         window.setTimeout(() => stabilizeFocusAfterDelete(), 0)
       }, 0)
@@ -212,15 +215,17 @@ export default function EventsView(): JSX.Element {
         closed: false
       }
       const stockCopy = { ...(data.stockByEvent[sourceId] ?? {}) }
+      const disabledCopy = { ...(data.disabledProductsByEvent[sourceId] ?? {}) }
       setData((prev) => ({
         ...prev,
         events: [...prev.events, ev],
         stockByEvent: { ...prev.stockByEvent, [ev.id]: stockCopy },
+        disabledProductsByEvent: { ...prev.disabledProductsByEvent, [ev.id]: disabledCopy },
         selectedEventId: ev.id
       }))
-      showToast({ variant: 'success', message: `Événement « ${ev.name} » créé avec le stock initial copié.` })
+      showToast({ variant: 'success', message: `Événement « ${ev.name} » créé avec le stock et les articles actifs copiés.` })
     },
-    [data.events, data.stockByEvent, setData, showToast]
+    [data.events, data.stockByEvent, data.disabledProductsByEvent, setData, showToast]
   )
 
   const closeEvent = useCallback(

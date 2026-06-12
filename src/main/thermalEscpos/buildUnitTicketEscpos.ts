@@ -1,3 +1,4 @@
+import { splitDiscountMotifReason } from '../../shared/catalog.js'
 import type { EscposPaperCutMode, EscposPaperWidth } from '../../shared/catalog.js'
 import { escposCharsPerLine, escposDotsPerLine } from '../../shared/catalog.js'
 import type { TicketUnitPayload } from '../../shared/ticket.js'
@@ -10,7 +11,7 @@ import {
   escposAlignLeft,
   escposBold,
   escposBoxedNotice,
-  escposDashRule,
+  escposCenteredRule,
   escposFeed,
   escposInit,
   escposLine,
@@ -37,9 +38,12 @@ function orderLineText(orderNumber: number): string {
   return formatOrderNo(orderNumber)
 }
 
-/** Proche du bloc `.unit-motif` HTML : centré, gras (même corps que l’événement). */
+/** Proche du bloc `.unit-motif` HTML : centré, gras ; label et commentaire sur lignes séparées. */
 function escposMotifBlock(text: string, w: number): Buffer {
-  const lines = wrapEscposLines(escposSafeText(text), w)
+  const { label, comment } = splitDiscountMotifReason(text)
+  const lines: string[] = []
+  if (label) lines.push(...wrapEscposLines(escposSafeText(label), w))
+  if (comment) lines.push(...wrapEscposLines(escposSafeText(comment), w))
   if (lines.length === 0) return Buffer.alloc(0)
   const chunks: Buffer[] = [escposSelectFontA(), escposAlignCenter(), escposBold(true)]
   for (const L of lines) {
@@ -53,7 +57,7 @@ function escposMotifBlock(text: string, w: number): Buffer {
  * Ticket unitaire en commandes ESC/POS (sans capture HTML) : ordre et hiérarchie alignés sur
  * `buildTicketsDocument` — logo raster un peu plus grand ; police **A** partout (pas de police B) ;
  * double **hauteur** pour la ligne commande ; **double largeur + hauteur** pour « 1 x … » ;
- * **Espacement** : un saut de ligne (`ESC d 1`) entre les blocs principaux ; date et heure sur une ligne.
+ * **Espacement** : un saut de ligne (`ESC d 1`) entre les blocs principaux ; date et heure sur deux lignes.
  */
 export function buildUnitTicketEscposBuffer(
   t: TicketUnitPayload,
@@ -161,7 +165,7 @@ export function buildUnitTicketEscposBuffer(
       ? [
           escposSelectFontA(),
           escposAlignCenter(),
-          escposDashRule(w),
+          escposCenteredRule(w),
           escposFeed(1),
           ...(showAssoFooter
             ? [
@@ -175,7 +179,8 @@ export function buildUnitTicketEscposBuffer(
           ...(showDateFooter
             ? [
                 escposSelectFontA(),
-                escposLine(escposSafeText(`${dateLong} - ${timeShort}`), w)
+                escposLine(escposSafeText(dateLong), w),
+                escposLine(escposSafeText(timeShort), w)
               ]
             : [])
         ]

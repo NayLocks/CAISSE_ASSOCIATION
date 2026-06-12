@@ -15,7 +15,21 @@ import {
   savePersistedData
 } from './stateStore.js'
 import { getClientDisplayFlags, setClientDisplayRemoteEnabled } from './clientDisplayServer.js'
-import { getRemoteMirror, replaceMirrorFromHttp } from './remoteCaisseState.js'
+import {
+  forceClaimCartEditor,
+  getCartEditor,
+  getRemoteMirror,
+  getRemoteStateRev,
+  replaceMirrorFromHttp,
+  tryReplaceMirrorFromHttp
+} from './remoteCaisseState.js'
+import {
+  addHeldCartForSelectedEvent,
+  getHeldCartsForSelectedEvent,
+  placeHeldCartForSelectedEvent,
+  removeHeldCartForSelectedEvent,
+  setHeldCartsForSelectedEvent
+} from './heldCartsStore.js'
 import { executeRemoteSale } from './remoteCaisseSale.js'
 import { loadSaleForRefund } from './remoteCaisseRefund.js'
 import {
@@ -24,6 +38,7 @@ import {
   paymentDetailLines
 } from './remoteCaisseHistory.js'
 import { buildTabletHtml } from './tabletPage.js'
+import { buildEventCashSummaryPayload } from './eventCashSummary.js'
 import {
   httpSumupCancelPayment,
   httpSumupCheckoutStatus,
@@ -31,7 +46,7 @@ import {
   httpSumupTransactionStatus
 } from './sumupHttpHandlers.js'
 import { parseClientPaymentDetail, setTabletPaymentSession } from './tabletClientDisplaySync.js'
-import { executeRemoteReceiptPrint } from './remoteCaissePrint.js'
+import { executeRemoteHoldSlipPrint, executeRemoteReceiptPrint } from './remoteCaissePrint.js'
 import { isEmailReceiptSmtpReady, sendSummaryReceiptEmail } from './emailReceipt.js'
 
 function mimeForImageExt(ext: string): string {
@@ -73,6 +88,19 @@ const CORS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+}
+
+/** Évite ERR_HTTP_HEADERS_SENT si le client coupe la connexion ou si une erreur survient après envoi. */
+function respondJson(res: ServerResponse, status: number, body: unknown): void {
+  if (res.headersSent) return
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+  res.end(typeof body === 'string' ? body : JSON.stringify(body))
+}
+
+function respondEmpty(res: ServerResponse, status: number, extraHeaders?: Record<string, string>): void {
+  if (res.headersSent) return
+  res.writeHead(status, { ...extraHeaders, ...CORS })
+  res.end()
 }
 
 function listLanUrls(port: number): string[] {
@@ -172,6 +200,7 @@ function buildBootstrapPayload() {
 
   const disp = getClientDisplayFlags()
   return {
+    rev: getRemoteStateRev(),
     associationName: data.association.name.trim() || 'Association',
     categories: data.categories,
     products: data.products.map((p) => {
@@ -183,9 +212,11 @@ function buildBootstrapPayload() {
         category: p.category,
         emoji: p.emoji,
         trackStock: p.trackStock,
+        lowStockThreshold: p.lowStockThreshold ?? null,
         variablePrice: p.variablePrice === true,
         cardCashExchange: p.cardCashExchange === true,
-        hasImage: Boolean(imgPath && existsSync(imgPath))
+        hasImage: Boolean(imgPath && existsSync(imgPath)),
+        enabledForEvent: eid ? data.disabledProductsByEvent[eid]?.[p.id] !== true : true
       }
     }),
     events: data.events.map((e) => ({ id: e.id, name: e.name, closed: e.closed === true })),
@@ -203,7 +234,9 @@ function buildBootstrapPayload() {
     smtpReceiptConfigured: isEmailReceiptSmtpReady(data),
     tabletTokenRequired: data.remoteCaisseTokenRequired !== false,
     cashPaymentUi: data.cashPaymentUi === 'express' ? 'express' : 'detail',
-    discountMotifs: data.discountMotifs
+    discountMotifs: data.discountMotifs,
+    held: getHeldCartsForSelectedEvent(),
+    cartEditor: getCartEditor()
   }
 }
 
@@ -231,6 +264,157 @@ async function handleRemoteApi(
     }
   }
 
+  /** État du pilotage (sans jeton) — écran d’attente tablette. */
+  if (rawPath === '/api/remote/status') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'GET') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const data = loadPersistedData()
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+    res.end(
+      JSON.stringify({
+        enabled: Boolean(data.remoteCaisseEnabled),
+        tokenRequired: data.remoteCaisseTokenRequired !== false
+      })
+    )
+    return true
+  }
+
+  /** Sonde légère : la tablette compare `rev` et recharge le bootstrap quand il change. */
+  if (rawPath === '/api/remote/rev') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'GET') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+    res.end(JSON.stringify({ rev: getRemoteStateRev() }))
+    return true
+  }
+
+  if (rawPath === '/api/remote/held') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'GET') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    respondJson(res, 200, getHeldCartsForSelectedEvent())
+    return true
+  }
+
+  if (rawPath === '/api/remote/held/add') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    try {
+      const raw = await readBody(req)
+      const body = raw
+        ? (JSON.parse(raw) as {
+            displayName?: unknown
+            totalCents?: unknown
+            lineCount?: unknown
+            mirror?: unknown
+          })
+        : {}
+      const totalCents = typeof body.totalCents === 'number' ? body.totalCents : NaN
+      const lineCount = typeof body.lineCount === 'number' ? body.lineCount : NaN
+      if (!Number.isFinite(totalCents) || !Number.isFinite(lineCount)) {
+        respondJson(res, 400, { error: 'totalCents et lineCount requis.' })
+        return true
+      }
+      const r = addHeldCartForSelectedEvent({
+        displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
+        totalCents,
+        lineCount,
+        mirror: body.mirror as RemoteCaisseMirror
+      })
+      if (!r.ok) {
+        respondJson(res, 400, { error: r.error })
+        return true
+      }
+      respondJson(res, 200, { ok: true, entry: r.entry, state: r.state })
+    } catch {
+      respondJson(res, 400, { error: 'Requête invalide.' })
+    }
+    return true
+  }
+
+  if (rawPath === '/api/remote/held/remove') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    try {
+      const raw = await readBody(req)
+      const body = raw ? (JSON.parse(raw) as { id?: unknown }) : {}
+      const id = typeof body.id === 'string' ? body.id.trim() : ''
+      if (!id) {
+        respondJson(res, 400, { error: 'Identifiant manquant.' })
+        return true
+      }
+      const state = removeHeldCartForSelectedEvent(id)
+      respondJson(res, 200, { ok: true, state })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      respondJson(res, 400, { error: msg })
+    }
+    return true
+  }
+
   if (rawPath === '/api/remote/bootstrap') {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, CORS)
@@ -250,6 +434,28 @@ async function handleRemoteApi(
     }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
     res.end(JSON.stringify(buildBootstrapPayload()))
+    return true
+  }
+
+  if (rawPath === '/api/remote/cart/force-control') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    const r = forceClaimCartEditor('tablet')
+    respondJson(res, 200, r)
     return true
   }
 
@@ -278,12 +484,15 @@ async function handleRemoteApi(
         res.end(JSON.stringify({ error: 'État invalide.' }))
         return true
       }
-      replaceMirrorFromHttp(m)
+      const r = tryReplaceMirrorFromHttp(m)
+      if (!r.ok) {
+        respondJson(res, 409, { error: r.error, cartEditor: getCartEditor() })
+        return true
+      }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ ok: true, mirror: getRemoteMirror() }))
+      res.end(JSON.stringify({ ok: true, mirror: getRemoteMirror(), cartEditor: getCartEditor() }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'JSON invalide.' }))
+      respondJson(res, 400, { error: 'JSON invalide.' })
     }
     return true
   }
@@ -325,8 +534,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -365,8 +573,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true, orderNumber: result.orderNumber, totalCents: result.totalCents }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -414,8 +621,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -445,14 +651,24 @@ async function handleRemoteApi(
         body.eventId === null || body.eventId === undefined || body.eventId === ''
           ? null
           : String(body.eventId)
+      const prevEventId = data.selectedEventId
+      const prevEv = prevEventId ? data.events.find((x) => x.id === prevEventId) : undefined
       savePersistedData({ ...data, selectedEventId: eventId })
       replaceMirrorFromHttp(emptyMirror())
       broadcastRefresh()
+      const newEv = eventId ? data.events.find((x) => x.id === eventId) : undefined
+      for (const w of BrowserWindow.getAllWindows()) {
+        w.webContents.send('remote-caisse:event-changed', {
+          eventId,
+          eventName: newEv?.name ?? null,
+          previousEventId: prevEventId,
+          previousEventName: prevEv?.name ?? null
+        })
+      }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -484,6 +700,40 @@ async function handleRemoteApi(
     }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
     res.end(JSON.stringify({ sales }))
+    return true
+  }
+
+  if (rawPath === '/api/remote/event-cash-summary') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'GET') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    const data = loadPersistedData()
+    const eid = data.selectedEventId
+    const ev = eid ? data.events.find((x) => x.id === eid) : undefined
+    const sessionInfo = eid ? data.eventSessions[eid] : undefined
+    const sessionStarted = Boolean(ev && sessionInfo && ev.closed !== true)
+    const payload = buildEventCashSummaryPayload(
+      eid,
+      sessionInfo ? sessionInfo.floatCents : null,
+      sessionStarted,
+      ev?.name ?? null,
+      data.products
+    )
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+    res.end(JSON.stringify(payload))
     return true
   }
 
@@ -562,8 +812,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true, mirror: getRemoteMirror() }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -603,8 +852,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify(r))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -710,8 +958,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -754,8 +1001,132 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
+    }
+    return true
+  }
+
+  /** Mise en attente atomique : impression + enregistrement. */
+  if (rawPath === '/api/remote/hold/place') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    try {
+      const raw = await readBody(req)
+      const body = raw
+        ? (JSON.parse(raw) as {
+            displayName?: unknown
+            totalCents?: unknown
+            lineCount?: unknown
+            mirror?: unknown
+          })
+        : {}
+      const totalCents = typeof body.totalCents === 'number' ? body.totalCents : NaN
+      const lineCount = typeof body.lineCount === 'number' ? body.lineCount : NaN
+      if (!Number.isFinite(totalCents) || !Number.isFinite(lineCount)) {
+        respondJson(res, 400, { error: 'totalCents et lineCount requis.' })
+        return true
+      }
+      const r = await placeHeldCartForSelectedEvent({
+        displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
+        totalCents,
+        lineCount,
+        mirror: body.mirror as RemoteCaisseMirror
+      })
+      if (!r.ok) {
+        respondJson(res, 400, { error: r.error })
+        return true
+      }
+      respondJson(res, 200, { ok: true, entry: r.entry, state: r.state })
+    } catch {
+      respondJson(res, 400, { error: 'Requête invalide.' })
+    }
+    return true
+  }
+
+  if (rawPath === '/api/remote/held/set') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    try {
+      const raw = await readBody(req)
+      const body = raw ? (JSON.parse(raw) as { state?: unknown }) : {}
+      if (!body.state || typeof body.state !== 'object') {
+        respondJson(res, 400, { error: 'État invalide.' })
+        return true
+      }
+      const state = setHeldCartsForSelectedEvent(body.state as import('../shared/heldCarts.js').HeldCartPersistedState)
+      respondJson(res, 200, { ok: true, state })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      respondJson(res, 400, { error: msg })
+    }
+    return true
+  }
+
+  /** Ticket d’attente (panier mis de côté sur la tablette) : impression côté caisse. */
+  if (rawPath === '/api/remote/hold/print') {
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, CORS)
+      res.end()
+      return true
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, CORS)
+      res.end()
+      return true
+    }
+    const v = verifyRemote(req)
+    if (!v.ok) {
+      res.writeHead(v.status, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(v.body)
+      return true
+    }
+    try {
+      const raw = await readBody(req)
+      const body = raw ? (JSON.parse(raw) as { ticketLabel?: unknown }) : {}
+      const ticketLabel = typeof body.ticketLabel === 'string' ? body.ticketLabel.trim() : ''
+      if (!ticketLabel) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+        res.end(JSON.stringify({ error: 'Libellé de ticket manquant.' }))
+        return true
+      }
+      const r = await executeRemoteHoldSlipPrint(ticketLabel)
+      if (!r.ok) {
+        res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+        res.end(JSON.stringify({ error: r.error }))
+        return true
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
+      res.end(JSON.stringify({ ok: true }))
+    } catch {
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -808,8 +1179,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -886,8 +1256,7 @@ async function handleRemoteApi(
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
       res.end(JSON.stringify({ ok: true }))
     } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Requête invalide.' }))
+      respondJson(res, 400, { error: 'Requête invalide.' })
     }
     return true
   }
@@ -905,11 +1274,13 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     try {
       const handled = await handleRemoteApi(req, res, rawPath, query)
       if (handled) return
-      res.writeHead(404, CORS)
-      res.end()
-    } catch {
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', ...CORS })
-      res.end(JSON.stringify({ error: 'Erreur serveur.' }))
+      respondEmpty(res, 404)
+    } catch (e) {
+      if (!res.headersSent) {
+        respondJson(res, 500, { error: 'Erreur serveur.' })
+      } else {
+        console.error('[remote-caisse] erreur après envoi de la réponse', e)
+      }
     }
   })()
 }
@@ -937,4 +1308,18 @@ export function startRemoteCaisseServer(): void {
   const s = createServer(handleRequest)
   httpServer = s
   tryListen(s, 3850)
+}
+
+/** Arrêt propre (quitter l’app) : coupe les connexions en cours puis libère le port. */
+export function stopRemoteCaisseServer(): void {
+  const s = httpServer
+  if (!s) return
+  httpServer = null
+  boundPort = 0
+  try {
+    s.closeAllConnections()
+  } catch {
+    /* ignore */
+  }
+  s.close()
 }

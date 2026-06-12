@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('caisse', {
-  version: '0.6.0',
+  version: '1.0.2',
   listAssociations: () =>
     ipcRenderer.invoke('associations:list') as Promise<{
       ok: true
@@ -275,8 +275,19 @@ contextBridge.exposeInMainWorld('caisse', {
   getRemoteCaisseInfo: () =>
     ipcRenderer.invoke('remote-caisse:get-info') as Promise<{ port: number; urls: string[] }>,
   remoteCaisseGetMirror: () => ipcRenderer.invoke('remote-caisse:get-mirror'),
+  remoteCaisseGetCartGate: () =>
+    ipcRenderer.invoke('remote-caisse:get-cart-gate') as Promise<{ cartEditor: 'pc' | 'tablet' | null }>,
+  remoteCaisseForceCartControl: () =>
+    ipcRenderer.invoke('remote-caisse:force-cart-control') as Promise<{
+      ok: true
+      cartEditor: 'pc' | 'tablet' | null
+      previousEditor: 'pc' | 'tablet' | null
+      claimedBy: 'pc' | 'tablet'
+    }>,
   remoteCaissePublishState: (state: unknown) =>
-    ipcRenderer.invoke('remote-caisse:publish-state', state) as Promise<{ ok: boolean }>,
+    ipcRenderer.invoke('remote-caisse:publish-state', state) as Promise<
+      { ok: true } | { ok: false; error: string }
+    >,
   remoteCaisseSetConfig: (payload: {
     enabled?: boolean
     regenerateToken?: boolean
@@ -294,6 +305,34 @@ contextBridge.exposeInMainWorld('caisse', {
     ipcRenderer.on('remote-caisse:state-sync', fn)
     return () => ipcRenderer.removeListener('remote-caisse:state-sync', fn)
   },
+  onRemoteCartEditor: (cb: (editor: 'pc' | 'tablet' | null) => void) => {
+    const fn = (_e: unknown, editor: 'pc' | 'tablet' | null) => cb(editor)
+    ipcRenderer.on('remote-caisse:cart-editor', fn)
+    return () => ipcRenderer.removeListener('remote-caisse:cart-editor', fn)
+  },
+  onRemoteCartControlForced: (
+    cb: (p: {
+      cartEditor: 'pc' | 'tablet' | null
+      previousEditor: 'pc' | 'tablet' | null
+      claimedBy: 'pc' | 'tablet'
+    }) => void
+  ) => {
+    const fn = (_e: unknown, p: unknown) => cb(p as Parameters<typeof cb>[0])
+    ipcRenderer.on('remote-caisse:cart-control-forced', fn)
+    return () => ipcRenderer.removeListener('remote-caisse:cart-control-forced', fn)
+  },
+  onRemoteCaisseEventChanged: (
+    cb: (p: {
+      eventId: string | null
+      eventName: string | null
+      previousEventId: string | null
+      previousEventName: string | null
+    }) => void
+  ) => {
+    const fn = (_e: unknown, p: unknown) => cb(p as Parameters<typeof cb>[0])
+    ipcRenderer.on('remote-caisse:event-changed', fn)
+    return () => ipcRenderer.removeListener('remote-caisse:event-changed', fn)
+  },
   onRemoteCaisseRefreshData: (cb: () => void) => {
     const fn = () => cb()
     ipcRenderer.on('remote-caisse:refresh-data', fn)
@@ -303,6 +342,54 @@ contextBridge.exposeInMainWorld('caisse', {
     const fn = (_e: unknown, p: { orderNumber: number; totalCents: number }) => cb(p)
     ipcRenderer.on('remote-caisse:sale-done', fn)
     return () => ipcRenderer.removeListener('remote-caisse:sale-done', fn)
+  },
+  heldCartsGet: () =>
+    ipcRenderer.invoke('held-carts:get') as Promise<
+      | { ok: true; entries: import('../shared/heldCarts.js').StoredHeldCart[]; nextHoldTicketNum: number }
+      | { ok: false; error: string }
+    >,
+  heldCartsSet: (state: import('../shared/heldCarts.js').HeldCartPersistedState) =>
+    ipcRenderer.invoke('held-carts:set', state) as Promise<
+      | { ok: true; entries: import('../shared/heldCarts.js').StoredHeldCart[]; nextHoldTicketNum: number }
+      | { ok: false; error: string }
+    >,
+  heldCartsPlace: (payload: {
+    displayName?: string
+    totalCents: number
+    lineCount: number
+    mirror: import('../shared/remoteCaisseMirror.js').RemoteCaisseMirror
+  }) =>
+    ipcRenderer.invoke('held-carts:place', payload) as Promise<
+      | {
+          ok: true
+          entry: import('../shared/heldCarts.js').StoredHeldCart
+          state: import('../shared/heldCarts.js').HeldCartPersistedState
+        }
+      | { ok: false; error: string }
+    >,
+  heldCartsAdd: (payload: {
+    displayName?: string
+    totalCents: number
+    lineCount: number
+    mirror: import('../shared/remoteCaisseMirror.js').RemoteCaisseMirror
+  }) =>
+    ipcRenderer.invoke('held-carts:add', payload) as Promise<
+      | {
+          ok: true
+          entry: import('../shared/heldCarts.js').StoredHeldCart
+          state: import('../shared/heldCarts.js').HeldCartPersistedState
+        }
+      | { ok: false; error: string }
+    >,
+  heldCartsRemove: (id: string) =>
+    ipcRenderer.invoke('held-carts:remove', id) as Promise<
+      | { ok: true; entries: import('../shared/heldCarts.js').StoredHeldCart[]; nextHoldTicketNum: number }
+      | { ok: false; error: string }
+    >,
+  onHeldCartsUpdated: (cb: () => void) => {
+    const fn = () => cb()
+    ipcRenderer.on('held-carts:updated', fn)
+    return () => ipcRenderer.removeListener('held-carts:updated', fn)
   },
   backupExportFull: () =>
     ipcRenderer.invoke('backup:export-full') as Promise<

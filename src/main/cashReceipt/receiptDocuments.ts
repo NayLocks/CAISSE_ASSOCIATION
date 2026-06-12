@@ -11,7 +11,9 @@ import { escHtml, escHtmlMultiline, formatMoneyEur, formatOrderNo } from './form
 import {
   orderLineHtml,
   paymentSummaryHtml,
-  receiptFooterLegalHtml
+  receiptFooterLegalHtml,
+  unitTicketFootDatelineHtml,
+  unitTicketMotifHtml
 } from './receiptFragments.js'
 import { receiptDocumentStyles, type ReceiptDocumentCssOptions } from './receiptDocumentCss.js'
 
@@ -70,11 +72,7 @@ export function buildTicketsDocument(
         minute: '2-digit',
         second: '2-digit'
       })
-      const footDateline = showDateTime
-        ? `<div class="foot-dateline" aria-label="Date et heure">
-            <span class="foot-dateline__date">${escHtml(dateLong)}</span><span class="foot-dateline__dash"> - </span><span class="foot-dateline__time">${escHtml(timeShort)}</span>
-          </div>`
-        : ''
+      const footDateline = showDateTime ? unitTicketFootDatelineHtml(dateLong, timeShort) : ''
       const footBlock =
         footAsso || footDateline
           ? `<div class="foot foot-unit">
@@ -84,12 +82,10 @@ export function buildTicketsDocument(
           : ''
       const dr = typeof t.discountReason === 'string' ? t.discountReason.trim() : ''
       const lineMotifBlock =
-        dr && shouldShowDiscountMotifOnUnitTicket(dr)
-          ? `<div class="unit-motif">${escHtml(dr)}</div>`
-          : ''
+        dr && shouldShowDiscountMotifOnUnitTicket(dr) ? unitTicketMotifHtml(dr) : ''
       const cartCr = typeof t.cartDiscountReason === 'string' ? t.cartDiscountReason.trim() : ''
       /** Pas de montant / % sur le ticket unitaire : uniquement le texte du motif (si présent). */
-      const cartMotifBlock = cartCr.length > 0 ? `<div class="unit-motif">${escHtml(cartCr)}</div>` : ''
+      const cartMotifBlock = cartCr.length > 0 ? unitTicketMotifHtml(cartCr) : ''
       const validityBlock =
         rawValidity.length > 0
           ? `<div class="validity-notice-wrap"><div class="validity-notice">${escHtmlMultiline(
@@ -149,11 +145,7 @@ export function buildHoldSlipDocument(
     minute: '2-digit',
     second: '2-digit'
   })
-  const footDateline = showDateTime
-    ? `<div class="foot-dateline" aria-label="Date et heure">
-            <span class="foot-dateline__date">${escHtml(dateLong)}</span><span class="foot-dateline__dash"> - </span><span class="foot-dateline__time">${escHtml(timeShort)}</span>
-          </div>`
-    : ''
+  const footDateline = showDateTime ? unitTicketFootDatelineHtml(dateLong, timeShort) : ''
   const footBlock =
     footAsso || footDateline
       ? `<div class="foot foot-unit">

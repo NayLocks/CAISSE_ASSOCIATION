@@ -69,8 +69,21 @@ import {
 } from './clientDisplayServer.js'
 import { getTabletPaymentOverlay } from './tabletClientDisplaySync.js'
 import { getRemoteCaisseInfo } from './remoteCaisseServer.js'
+import {
+  addHeldCartForSelectedEvent,
+  getHeldCartsForSelectedEvent,
+  placeHeldCartForSelectedEvent,
+  removeHeldCartForSelectedEvent,
+  setHeldCartsForSelectedEvent
+} from './heldCartsStore.js'
+import type { HeldCartPersistedState } from '../shared/heldCarts.js'
 import type { RemoteCaisseMirror } from '../shared/remoteCaisseMirror.js'
-import { getRemoteMirror, setMirrorFromRenderer } from './remoteCaisseState.js'
+import {
+  forceClaimCartEditor,
+  getRemoteCartGate,
+  getRemoteMirror,
+  trySetMirrorFromRenderer
+} from './remoteCaisseState.js'
 import {
   exportCurrentAssociationBackup,
   exportCurrentToBackupFolder,
@@ -292,10 +305,90 @@ export function registerIpc(): void {
 
   ipcMain.handle('remote-caisse:get-mirror', () => getRemoteMirror())
 
+  ipcMain.handle('remote-caisse:get-cart-gate', () => getRemoteCartGate())
+
+  ipcMain.handle('remote-caisse:force-cart-control', () => forceClaimCartEditor('pc'))
+
+  ipcMain.handle('held-carts:get', () => {
+    try {
+      const state = getHeldCartsForSelectedEvent()
+      return { ok: true as const, ...state }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return { ok: false as const, error: msg }
+    }
+  })
+
+  ipcMain.handle('held-carts:set', (_e, state: unknown) => {
+    try {
+      if (!state || typeof state !== 'object') {
+        return { ok: false as const, error: 'État invalide.' }
+      }
+      const s = state as HeldCartPersistedState
+      const result = setHeldCartsForSelectedEvent(s)
+      return { ok: true as const, ...result }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return { ok: false as const, error: msg }
+    }
+  })
+
+  ipcMain.handle(
+    'held-carts:place',
+    (
+      _e,
+      payload: {
+        displayName?: string
+        totalCents: number
+        lineCount: number
+        mirror: RemoteCaisseMirror
+      }
+    ) => {
+      try {
+        return placeHeldCartForSelectedEvent(payload)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return { ok: false as const, error: msg }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    'held-carts:add',
+    (
+      _e,
+      payload: {
+        displayName?: string
+        totalCents: number
+        lineCount: number
+        mirror: RemoteCaisseMirror
+      }
+    ) => {
+      try {
+        return addHeldCartForSelectedEvent(payload)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return { ok: false as const, error: msg }
+      }
+    }
+  )
+
+  ipcMain.handle('held-carts:remove', (_e, id: unknown) => {
+    try {
+      if (typeof id !== 'string' || !id.trim()) {
+        return { ok: false as const, error: 'Identifiant manquant.' }
+      }
+      const state = removeHeldCartForSelectedEvent(id.trim())
+      return { ok: true as const, ...state }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return { ok: false as const, error: msg }
+    }
+  })
+
   ipcMain.handle('remote-caisse:publish-state', (_e, state: unknown) => {
-    if (!state || typeof state !== 'object') return { ok: false as const }
-    setMirrorFromRenderer(state as RemoteCaisseMirror)
-    return { ok: true as const }
+    if (!state || typeof state !== 'object') return { ok: false as const, error: 'État invalide.' }
+    return trySetMirrorFromRenderer(state as RemoteCaisseMirror)
   })
 
   ipcMain.handle(

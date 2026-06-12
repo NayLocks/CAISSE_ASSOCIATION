@@ -19,6 +19,33 @@ export function listLowStockProducts(
   })
 }
 
+/** Stock affiché en caisse : déduit le panier en cours (ou recrédite en remboursement). */
+export function stockRemainingForCart(
+  product: ProductConfig,
+  stockMap: Record<string, number>,
+  inCartQty: number,
+  refundMode: boolean
+): number {
+  if (!product.trackStock) return Number.POSITIVE_INFINITY
+  const avail = stockMap[product.id] ?? 0
+  return refundMode ? avail + inCartQty : Math.max(0, avail - inCartQty)
+}
+
+/** Alertes stock bas cohérentes PC / tablette (seuil appliqué au stock restant après panier). */
+export function listLowStockProductsAfterCart(
+  products: ProductConfig[],
+  stockMap: Record<string, number>,
+  quantities: Record<string, number>,
+  refundMode: boolean
+): ProductConfig[] {
+  return products.filter((p) => {
+    if (!p.trackStock) return false
+    const inCart = quantities[p.id] ?? 0
+    const rem = stockRemainingForCart(p, stockMap, inCart, refundMode)
+    return isLowStock(p, rem)
+  })
+}
+
 /** Stock disponible pour un événement (articles suivis). */
 export function getStockMap(data: AppPersistedData, eventId: string | null): Record<string, number> {
   if (!eventId) return {}
@@ -36,6 +63,29 @@ export function removeProductFromAllStock(
     out[eid] = mm
   }
   return out
+}
+
+export function removeProductFromAllDisabledByEvent(
+  disabledProductsByEvent: Record<string, Record<string, true>>,
+  productId: string
+): Record<string, Record<string, true>> {
+  const out: Record<string, Record<string, true>> = {}
+  for (const [eid, m] of Object.entries(disabledProductsByEvent)) {
+    const mm = { ...m }
+    delete mm[productId]
+    out[eid] = mm
+  }
+  return out
+}
+
+/** Article utilisable à la vente sur l’événement (défaut : oui). */
+export function isProductEnabledForEvent(
+  data: AppPersistedData,
+  eventId: string | null,
+  productId: string
+): boolean {
+  if (!eventId) return true
+  return data.disabledProductsByEvent[eventId]?.[productId] !== true
 }
 
 /** Initialise la quantité à 0 pour un article sur tous les événements (activation suivi stock). */

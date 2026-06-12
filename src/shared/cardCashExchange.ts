@@ -1,6 +1,6 @@
 import type { ProductConfig } from './catalog'
 
-/** Article « échange carte / espèces » : seul dans le panier, paiement carte obligatoire. */
+/** Article « échange carte / espèces » : seul type d’article dans le panier (quantité libre), paiement carte obligatoire. */
 export function isCardCashExchangeProduct(p: ProductConfig | undefined | null): boolean {
   return p?.cardCashExchange === true
 }
@@ -34,12 +34,6 @@ export function canAddProductToCart(
           'Cet article d’échange carte / espèces doit être seul dans le panier. Videz le panier d’abord.'
       }
     }
-    if ((quantities[candidate.id] ?? 0) >= 1) {
-      return {
-        ok: false,
-        message: 'Un seul échange carte / espèces à la fois (quantité 1).'
-      }
-    }
   } else if (exchangeInCart) {
     return {
       ok: false,
@@ -52,6 +46,7 @@ export function canAddProductToCart(
 export function cartIsCardCashExchangeSale(
   lines: { product: ProductConfig; qty: number }[]
 ): boolean {
-  if (lines.length !== 1 || lines[0]!.qty !== 1) return false
-  return isCardCashExchangeProduct(lines[0]!.product)
+  if (lines.length !== 1) return false
+  const line = lines[0]!
+  return line.qty > 0 && isCardCashExchangeProduct(line.product)
 }

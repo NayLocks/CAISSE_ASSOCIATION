@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ProductConfig } from '@shared/catalog'
-import { getStockMap, initProductStockAcrossEvents, removeProductFromAllStock } from '@shared/inventory'
+import { getStockMap, initProductStockAcrossEvents, removeProductFromAllDisabledByEvent, removeProductFromAllStock } from '@shared/inventory'
 import { useAppState } from '@renderer/state/AppStateContext'
 import { useToast } from '@renderer/state/ToastContext'
 import { centsToEurosInput, parseEurosToCents } from '@renderer/utils/money'
@@ -233,7 +233,8 @@ export default function ArticlesView(): JSX.Element {
         setData((prev) => ({
           ...prev,
           products: prev.products.filter((x) => x.id !== id),
-          stockByEvent: removeProductFromAllStock(prev.stockByEvent, id)
+          stockByEvent: removeProductFromAllStock(prev.stockByEvent, id),
+          disabledProductsByEvent: removeProductFromAllDisabledByEvent(prev.disabledProductsByEvent, id)
         }))
         window.setTimeout(() => stabilizeFocusAfterDelete(), 0)
       }, 0)
@@ -376,7 +377,7 @@ export default function ArticlesView(): JSX.Element {
                         </div>
                       </div>
                     </td>
-                    <td>
+                    <td className="td-name">
                       <input
                         type="text"
                         className="input-inline"
@@ -419,7 +420,7 @@ export default function ArticlesView(): JSX.Element {
                       </label>
                     </td>
                     <td className="td-center">
-                      <label className="check-label" title="Paiement carte obligatoire, article seul dans le panier ; sortie d’espèces du tiroir">
+                      <label className="check-label" title="Paiement carte obligatoire, article seul dans le panier (quantité libre) ; sortie d’espèces du tiroir">
                         <input
                           type="checkbox"
                           checked={p.cardCashExchange === true}
